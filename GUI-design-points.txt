@@ -1,0 +1,29 @@
+ Global controls:
+  
+  - Point Count (2–8)
+  - Texture (centre cutoff)
+  - Texture Spread (random offset range)
+  - Spread (stereo width)
+  - Spread Shape (linear/arc toggle)
+  - Resonance (global Q)
+  - Global Feedback
+  - Feedback LP Filter frequency
+  - Pitch Shift (global, ±24 semitones) — will become per-point in Phase 4
+  - Wet/Dry
+  - Input Gain
+  - Output Gain
+  - Randomise (button)
+  
+  Per-point × 8:
+  
+  - Filter Type (LP/HP/BP/Notch)
+  - Cutoff Offset (display only, set by randomise)
+  - Q override
+  - Pan (with lock/unlock from global spread)
+  - Level
+  - Feedback Amount
+  - Pitch Shift Amount
+  
+  On asset format — SVG is the better choice for a plugin UI. DPF uses NanoVG for drawing, which natively supports SVG-style vector operations (paths, fills, strokes,
+  gradients). You don't render SVGs directly, but you can use them as design references and translate them to NanoVG draw calls fairly directly. PNGs work too and are simpler
+  to integrate (DPF can load them as textures), but they don't scale with the resizable window.

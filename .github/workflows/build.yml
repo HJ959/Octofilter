@@ -1,0 +1,88 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  # ── macOS (VST3 + AU + CLAP, universal binary) ──────────────────────────────
+  build-macos:
+    name: macOS (arm64 + x86_64)
+    runs-on: macos-13
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -G Ninja
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Verify universal binary
+        run: |
+          find build -name "*.vst3" -o -name "*.component" -o -name "*.clap" | head -5
+          # Check at least one slice is present (lipo -info on the binary inside the bundle)
+          find build -name "Octofilter" -type f | xargs lipo -info 2>/dev/null || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Octofilter-macOS
+          path: |
+            build/**/*.vst3
+            build/**/*.component
+            build/**/*.clap
+          if-no-files-found: warn
+
+  # ── Windows (VST3 + CLAP) ────────────────────────────────────────────────────
+  build-windows:
+    name: Windows (x64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: |
+          cmake -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Octofilter-Windows
+          path: |
+            build/**/*.vst3
+            build/**/*.clap
+          if-no-files-found: warn
+
+  # ── clang-format check ───────────────────────────────────────────────────────
+  format-check:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: sudo apt-get install -y clang-format
+
+      - name: Check formatting
+        run: |
+          find src/ -name "*.cpp" -o -name "*.hpp" -o -name "*.h" \
+            | xargs clang-format --dry-run --Werror

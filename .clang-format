@@ -1,0 +1,53 @@
+---
+Language:        Cpp
+BasedOnStyle:    LLVM
+
+# Indentation
+IndentWidth:             4
+TabWidth:                4
+UseTab:                  Never
+ContinuationIndentWidth: 4
+
+# Line length
+ColumnLimit:     100
+
+# Braces
+BreakBeforeBraces: Allman
+
+# Alignment
+AlignAfterOpenBracket:     Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignTrailingComments:     true
+AlignOperands:             true
+
+# Includes
+SortIncludes:     true
+IncludeBlocks:    Regroup
+IncludeCategories:
+  - Regex:    '^"DistrhoPlugin'   # DPF headers first
+    Priority: 1
+  - Regex:    '^"'                # project headers
+    Priority: 2
+  - Regex:    '^<'                # system/third-party
+    Priority: 3
+
+# Spacing
+SpaceBeforeParens:          ControlStatements
+SpaceInEmptyParentheses:    false
+SpacesInCStyleCastParentheses: false
+SpaceAfterCStyleCast:       false
+
+# Pointers & references
+PointerAlignment:  Right
+
+# Short forms — keep short functions and lambdas on one line
+AllowShortFunctionsOnASingleLine:  Inline
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine:      false
+AllowShortLambdasOnASingleLine:    Inline
+
+# Misc
+Cpp11BracedListStyle:   true
+FixNamespaceComments:   true
+ReflowComments:         true
