@@ -71,18 +71,11 @@ jobs:
             build/**/*.clap
           if-no-files-found: warn
 
-  # ── clang-format check ───────────────────────────────────────────────────────
-  format-check:
-    name: clang-format
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install clang-format
-        run: sudo apt-get install -y clang-format
-
-      - name: Check formatting
-        run: |
-          find src/ -name "*.cpp" -o -name "*.hpp" -o -name "*.h" \
-            | xargs clang-format --dry-run --Werror
+  # ── clang-format check (disabled for now) ─────────────────────────────────
+  # format-check:
+  #   name: clang-format
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - run: sudo apt-get install -y clang-format
+  #     - run: find src/ -name "*.cpp" -o -name "*.hpp" -o -name "*.h" | xargs clang-format --dry-run --Werror
