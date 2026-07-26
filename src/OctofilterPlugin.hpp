@@ -79,6 +79,11 @@ private:
     int    mActivePoints { 2 };
     double mSampleRate   { 44100.0 };
 
+    // Waveform display ring buffer (written by DSP, read by UI)
+    static constexpr int kWaveformBufSize = 2048;
+    float  mWaveformBuf[kWaveformBufSize] {};
+    int    mWaveformWritePos { 0 };
+
     // ── Global parameter values ───────────────────────────────────────────
     float mTexture        { 0.5f };
     float mTextureSpread  { 1.0f };

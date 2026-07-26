@@ -281,6 +281,45 @@ or destroy it manually.
 
 ---
 
+## Phase 6c — UI Iteration (User Feedback)
+
+**Goal:** Implement UI improvements from first user testing session.
+
+### Tasks
+
+#### Randomise Variations
+- [ ] **Randomise All** — replaces current "RANDOM" button in top bar. Randomises ALL parameters
+  including globals (Texture, Feedback, Pitch, Resonance, Glide) plus all per-point params.
+- [ ] **Per-point Randomise** — small button in the per-point panel (right side). Randomises only
+  the currently selected point's params (filter type, cutoff offset, Q, pan, level, FB, pitch).
+- [ ] **Global Randomise** — small button in the global strip (bottom). Randomises only global
+  params (Texture, Resonance, Feedback, Pitch, Wet/Dry, Glide).
+
+#### Multi-Select Points
+- [ ] Ctrl+click on points to add/remove from selection (toggle behaviour)
+- [ ] Dragging with multiple points selected moves all selected points together (X=pan, Y=cutoff)
+- [ ] Per-point panel shows the first selected point's params (last clicked = "primary" selection)
+- [ ] Visual: all selected points get the highlight ring, primary gets a thicker/brighter ring
+- [ ] Clicking empty space or clicking without Ctrl deselects all
+
+#### Waveform Display
+- [ ] Add a ring buffer in the DSP (size ~2048 samples) that stores recent output L+R mixed
+- [ ] UI reads from this buffer each frame and draws an oscilloscope-style waveform
+- [ ] Positioned bottom-right of the stereo field as a small inset box (~120×60 px)
+- [ ] Styled: dark inset background, waveform drawn in accent colour (purple or gold)
+- [ ] Non-interactive (display only)
+
+#### Bug Fix
+- [ ] **Wet/Dry glide bug** — Wet/Dry parameter is incorrectly affected by the cutoff glide
+  system. Fix: wet/dry should always be applied directly (instant), never glided. Ensure the
+  raw `mWetDry` value is used in run() without any smoothing or glide interaction.
+
+**Dependencies:** Phase 6 (core UI complete).
+
+**Effort estimate:** ~1.5 days total (randomise variations: 1hr, multi-select: 4hr, waveform: 4hr, bug fix: 15min).
+
+---
+
 ## Phase 7 — Integration & Polish
 
 **Goal:** Plugin sounds good, performs within CPU budget, ships clean.
@@ -325,6 +364,30 @@ or destroy it manually.
 
 ---
 
+## Phase 9 — Presets, Menu & Distribution
+
+**Goal:** Preset system, settings menu, info screen, and preparation for distribution.
+
+### Tasks
+- [ ] **Pop-up menu system** — overlay UI triggered by a menu button (hamburger/gear icon)
+- [ ] **Preset browser** — load/save/browse preset files (.octopreset JSON files)
+  - Factory presets bundled with the plugin
+  - User presets saved to user directory
+  - Preset name displayed in top bar
+- [ ] **Output limiter control** — optional panel in the menu to adjust safety limiter ceiling,
+  enable/disable, and set threshold. For advanced users.
+- [ ] **Info screen** — credits, special thanks, email, links to artist/developer pages
+- [ ] **Legalities & distribution** — determine licensing for distribution:
+  - All dependencies are MIT/ISC/BSD (no GPL issues)
+  - Plugin can be distributed as closed-source commercial product
+  - Add EULA/licence text to installer
+  - Determine pricing model (free / paid / donationware)
+- [ ] **Installer** — Windows: NSIS or Inno Setup installer. macOS: .pkg or .dmg.
+
+**Dependencies:** Phase 8 (stable, tested plugin).
+
+---
+
 ## Technical Risks Summary
 
 | Risk | Mitigation | Status |
@@ -353,8 +416,10 @@ or destroy it manually.
 | 4 | Full parameter set, state save/restore | ✅ Complete (69 params, 59 visible) |
 | 5 | Harmonic mode with per-point glide | ✅ Complete |
 | 6 | Complete UI | 🔶 In progress (core layout done, iterating) |
+| 6c | UI iteration from user feedback | 🔲 Next |
 | 7 | Integration, CPU budget, AU/DAW validation | 🔲 |
 | 8 | Test suite, QA, release | 🔲 |
+| 9 | Presets, menu, distribution | 🔲 |
 
 ## Current State (2026-07-24)
 

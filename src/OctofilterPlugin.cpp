@@ -575,14 +575,6 @@ void OctofilterPlugin::run(const float** inputs, float** outputs, uint32_t frame
     float* outL = outputs[0];
     float* outR = outputs[1];
 
-    // Advance smoothers toward targets
-    mSmTexture.setTarget(mTexture);
-    mSmFeedback.setTarget(mFeedback);
-    mSmPitchShift.setTarget(mPitchShift);
-    mSmWetDry.setTarget(mWetDry);
-    mSmInputGain.setTarget(mInputGainLin);
-    mSmOutputGain.setTarget(mOutputGainLin);
-
     // Advance per-point cutoff glide (once per block)
     for (int i = 0; i < mActivePoints; ++i)
     {
@@ -595,11 +587,11 @@ void OctofilterPlugin::run(const float** inputs, float** outputs, uint32_t frame
         mPoints[i].setPitchShift(totalPitch);
     }
 
-    const float smoothTex      = mSmTexture.get();
-    const float smoothFeedback = mFeedback * 1.3f;  // direct, aggressive
-    const float smoothWetDry   = mWetDry;           // direct
-    const float smoothInGain   = mInputGainLin;     // direct
-    const float smoothOutGain  = mOutputGainLin;    // direct
+    // All globals used directly — no smoothing (glide handles cutoff transitions)
+    const float smoothFeedback = mFeedback * 1.3f;
+    const float smoothWetDry   = mWetDry;
+    const float smoothInGain   = mInputGainLin;
+    const float smoothOutGain  = mOutputGainLin;
 
     for (uint32_t f = 0; f < frames; ++f)
     {
@@ -645,6 +637,10 @@ void OctofilterPlugin::run(const float** inputs, float** outputs, uint32_t frame
         // Output safety: DC block then limit to prevent ear damage
         outL[f] = mOutputLimiterL.process(mOutputDCL.process(outL[f]));
         outR[f] = mOutputLimiterR.process(mOutputDCR.process(outR[f]));
+
+        // Write to waveform display buffer (L+R mix)
+        mWaveformBuf[mWaveformWritePos] = (outL[f] + outR[f]) * 0.5f;
+        mWaveformWritePos = (mWaveformWritePos + 1) % kWaveformBufSize;
     }
 }
 

@@ -1,5 +1,6 @@
 #include "DistrhoUI.hpp"
 #include "InterFont.hpp"
+#include "BgImage.hpp"
 #include <cstdio>
 #include <cmath>
 
@@ -98,6 +99,9 @@ public:
         setupGlobalKnobs();
         setupPerPointKnobs();
 
+        // Load background image from embedded data
+        fBgImage = createImageFromMemory(kBgImageData, kBgImageDataSize, 0);
+
         for (int i = 0; i < 8; ++i)
         {
             fPointFilterType[i] = 0.0f;
@@ -158,7 +162,15 @@ protected:
         // Background
         beginPath();
         rect(0, 0, w, h);
-        fillColor(Palette::bg);
+        if (fBgImage.isValid())
+        {
+            Paint bgPaint = imagePattern(0, 0, w, h, 0.0f, fBgImage, 1.0f);
+            fillPaint(bgPaint);
+        }
+        else
+        {
+            fillColor(Palette::bg);
+        }
         fill();
 
         // Layout: field on left (50% width, 65% height), per-point panel right, globals bottom
@@ -178,6 +190,7 @@ protected:
 
         drawTopBar(w, topBarH);
         drawStereoField(fieldX, fieldY, fieldW, fieldH);
+        drawWaveform(fieldX + fieldW - 130.0f, fieldY + fieldH - 70.0f, 120.0f, 60.0f);
         drawPerPointPanel(ppX, ppY, ppW, ppH);
         drawGlobalStrip(globalX, globalY, globalW, globalH);
     }
@@ -209,7 +222,7 @@ protected:
         fontSize(10.0f);
         fillColor(Palette::bg);
         textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
-        text(rndX + rndW * 0.5f, btnY + btnH * 0.5f, "RANDOM", nullptr);
+        text(rndX + rndW * 0.5f, btnY + btnH * 0.5f, "RND ALL", nullptr);
 
         // ── Harmonic Mode toggle ──────────────────────────────────────────
         const float harmX = rndX + rndW + 10.0f;
@@ -324,13 +337,13 @@ protected:
             const int ftype = static_cast<int>(fPointFilterType[i] + 0.5f) % 4;
             Color nodeColor = Palette::filterColor(ftype);
 
-            // Selection ring
-            if (i == fSelectedPoint)
+            // Selection ring (all selected get ring, primary gets thicker)
+            if (fPointSelected[i])
             {
                 beginPath();
                 circle(px, py, fbSize + 5.0f);
                 strokeColor(Palette::highlight);
-                strokeWidth(2.5f);
+                strokeWidth(i == fSelectedPoint ? 3.0f : 1.5f);
                 stroke();
             }
 
@@ -351,19 +364,75 @@ protected:
                 stroke();
             }
 
-            // Point number
-            fontSize(10.0f);
+            // Filter type label inside node
+            fontSize(11.0f);
             fillColor(Palette::bg);
             textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
-            char num[4];
-            std::snprintf(num, sizeof(num), "%d", i + 1);
-            text(px, py, num, nullptr);
+            const char* ftLabelsField[] = {"LP", "HP", "BP", "NT"};
+            const int ftIdx = static_cast<int>(fPointFilterType[i] + 0.5f) % 4;
+            text(px, py, ftLabelsField[ftIdx], nullptr);
 
             // Store position for hit testing
             fPointScreenX[i] = px;
             fPointScreenY[i] = py;
             fPointScreenR[i] = fbSize;
         }
+    }
+
+    // ── Waveform oscilloscope display ────────────────────────────────────
+    void drawWaveform(float x, float y, float w, float h)
+    {
+        // Dark inset background
+        beginPath();
+        roundedRect(x, y, w, h, 4.0f);
+        fillColor(Color(0.08f, 0.08f, 0.08f, 0.85f));
+        fill();
+        strokeColor(Palette::outline);
+        strokeWidth(0.5f);
+        stroke();
+
+        // Centre line
+        beginPath();
+        moveTo(x + 2.0f, y + h * 0.5f);
+        lineTo(x + w - 2.0f, y + h * 0.5f);
+        strokeColor(Color(1.0f, 1.0f, 1.0f, 0.1f));
+        strokeWidth(0.5f);
+        stroke();
+
+        // Animated waveform based on feedback/texture activity
+        // Use a phase counter that advances each frame for animation
+        fWavePhase += 0.05f + fFeedback * 0.15f;
+        if (fWavePhase > 100.0f) fWavePhase -= 100.0f;
+
+        const float amplitude = fFeedback * 0.8f + fTexture * 0.2f;
+        const float freq = 2.0f + fPitchShift * 0.1f;
+        const int numPoints = static_cast<int>(w - 4.0f);
+
+        if (amplitude > 0.01f)
+        {
+            beginPath();
+            for (int i = 0; i < numPoints; ++i)
+            {
+                const float t = static_cast<float>(i) / static_cast<float>(numPoints);
+                const float phase = fWavePhase + t * freq * 6.28f;
+                const float val = std::sin(phase) * amplitude
+                                + std::sin(phase * 2.3f + 1.0f) * amplitude * 0.4f
+                                + std::sin(phase * 0.7f + 2.0f) * amplitude * 0.3f;
+                const float py = y + h * 0.5f - val * h * 0.4f;
+                const float px = x + 2.0f + t * (w - 4.0f);
+
+                if (i == 0)
+                    moveTo(px, py);
+                else
+                    lineTo(px, py);
+            }
+            strokeColor(Color(Palette::accent.red, Palette::accent.green, Palette::accent.blue, 0.8f));
+            strokeWidth(1.5f);
+            stroke();
+        }
+
+        // Request continuous repaint for animation
+        repaint();
     }
 
     // ── Per-point panel (right side) ──────────────────────────────────────
@@ -384,14 +453,28 @@ protected:
             return;
         }
 
-        // Header
+        // Header + Per-point randomise button
         fontSize(15.0f);
         fontFaceId(fFontId);
         fillColor(Palette::highlight);
-        textAlign(ALIGN_CENTER | ALIGN_TOP);
+        textAlign(ALIGN_LEFT | ALIGN_TOP);
         char hdr[32];
         std::snprintf(hdr, sizeof(hdr), "POINT %d", fSelectedPoint + 1);
-        text(x + w * 0.5f, y + 8.0f, hdr, nullptr);
+        text(x + 8.0f, y + 8.0f, hdr, nullptr);
+
+        // Per-point RND button (top-right of panel)
+        fPPRndBtnX = x + w - 45.0f;
+        fPPRndBtnY = y + 6.0f;
+        fPPRndBtnW = 38.0f;
+        fPPRndBtnH = 16.0f;
+        beginPath();
+        roundedRect(fPPRndBtnX, fPPRndBtnY, fPPRndBtnW, fPPRndBtnH, 3.0f);
+        fillColor(Palette::highlight);
+        fill();
+        fontSize(9.0f);
+        fillColor(Palette::bg);
+        textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
+        text(fPPRndBtnX + fPPRndBtnW * 0.5f, fPPRndBtnY + fPPRndBtnH * 0.5f, "RND", nullptr);
 
         // Group labels
         fontSize(9.0f);
@@ -399,12 +482,7 @@ protected:
         textAlign(ALIGN_LEFT | ALIGN_TOP);
 
         const float row1Y = y + 35.0f;
-        const float row2Y = y + h * 0.37f + 15.0f;
-        const float row3Y = y + h * 0.65f + 10.0f;
-
         text(x + 8.0f, row1Y - 12.0f, "FILTER", nullptr);
-        text(x + 8.0f, row2Y - 12.0f, "SPATIAL / FB", nullptr);
-        text(x + 8.0f, row3Y - 12.0f, "MODULATION", nullptr);
 
         // Knob size
         const float knobR = 22.0f;
@@ -438,9 +516,18 @@ protected:
         }
 
         // Q and Cutoff knobs below the filter buttons
-        const float qcY = ftY + ftBtnH + knobR + 8.0f;
+        // Start just below buttons, then fixed spacing for each row
+        const float qcY = ftY + ftBtnH + knobR + 12.0f;
+        const float rowSpacing = knobR * 2.0f + 39.0f; // 18% more than original
         const float col1 = x + w * 0.3f;
         const float col2 = x + w * 0.7f;
+
+        // Section labels (FILTER is already above the buttons)
+        fontSize(9.0f);
+        fillColor(Palette::sage);
+        textAlign(ALIGN_LEFT | ALIGN_TOP);
+        text(x + 8.0f, qcY + rowSpacing - knobR - 10.0f, "SPATIAL / FB", nullptr);
+        text(x + 8.0f, qcY + rowSpacing * 2.0f - knobR - 10.0f, "MODULATION", nullptr);
 
         fPPKnobs[1].x = col1; fPPKnobs[1].y = qcY; fPPKnobs[1].radius = knobR;
         fPPKnobs[6].x = col2; fPPKnobs[6].y = qcY; fPPKnobs[6].radius = knobR;
@@ -450,14 +537,16 @@ protected:
         // Row 2: Pan + Feedback
         const float col1r2 = x + w * 0.3f;
         const float col2r2 = x + w * 0.7f;
-        fPPKnobs[2].x = col1r2; fPPKnobs[2].y = row2Y + knobR + 5.0f; fPPKnobs[2].radius = knobR;
-        fPPKnobs[4].x = col2r2; fPPKnobs[4].y = row2Y + knobR + 5.0f; fPPKnobs[4].radius = knobR;
+        const float row2KnobY = qcY + rowSpacing;
+        fPPKnobs[2].x = col1r2; fPPKnobs[2].y = row2KnobY; fPPKnobs[2].radius = knobR;
+        fPPKnobs[4].x = col2r2; fPPKnobs[4].y = row2KnobY; fPPKnobs[4].radius = knobR;
         drawKnob(fPPKnobs[2]);
         drawKnob(fPPKnobs[4]);
 
         // Row 3: Level + Pitch
-        fPPKnobs[3].x = col1r2; fPPKnobs[3].y = row3Y + knobR + 5.0f; fPPKnobs[3].radius = knobR;
-        fPPKnobs[5].x = col2r2; fPPKnobs[5].y = row3Y + knobR + 5.0f; fPPKnobs[5].radius = knobR;
+        const float row3KnobY = qcY + rowSpacing * 2.0f;
+        fPPKnobs[3].x = col1r2; fPPKnobs[3].y = row3KnobY; fPPKnobs[3].radius = knobR;
+        fPPKnobs[5].x = col2r2; fPPKnobs[5].y = row3KnobY; fPPKnobs[5].radius = knobR;
         drawKnob(fPPKnobs[3]);
         drawKnob(fPPKnobs[5]);
     }
@@ -509,6 +598,21 @@ protected:
 
         for (int i = 0; i < fNumGlobalKnobs; ++i)
             drawKnob(fGlobalKnobs[i]);
+
+        // Global RND button (left side of strip)
+        fGlobalRndBtnX = x + 8.0f;
+        fGlobalRndBtnY = y + 6.0f;
+        fGlobalRndBtnW = 40.0f;
+        fGlobalRndBtnH = 16.0f;
+        beginPath();
+        roundedRect(fGlobalRndBtnX, fGlobalRndBtnY, fGlobalRndBtnW, fGlobalRndBtnH, 3.0f);
+        fillColor(Palette::sage);
+        fill();
+        fontSize(9.0f);
+        fontFaceId(fFontId);
+        fillColor(Palette::bg);
+        textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
+        text(fGlobalRndBtnX + fGlobalRndBtnW * 0.5f, fGlobalRndBtnY + fGlobalRndBtnH * 0.5f, "RND", nullptr);
     }
 
     // ── Knob drawing ──────────────────────────────────────────────────────
@@ -567,7 +671,7 @@ protected:
         fill();
 
         // Label
-        fontSize(9.0f);
+        fontSize(11.0f);
         fontFaceId(fFontId);
         fillColor(Palette::text);
         textAlign(ALIGN_CENTER | ALIGN_TOP);
@@ -617,6 +721,25 @@ protected:
                     repaint();
                     return true;
                 }
+            }
+
+            // Per-point RND button
+            if (fSelectedPoint >= 0 &&
+                mx >= fPPRndBtnX && mx <= fPPRndBtnX + fPPRndBtnW &&
+                my >= fPPRndBtnY && my <= fPPRndBtnY + fPPRndBtnH)
+            {
+                doRandomisePointOnly();
+                repaint();
+                return true;
+            }
+
+            // Global RND button
+            if (mx >= fGlobalRndBtnX && mx <= fGlobalRndBtnX + fGlobalRndBtnW &&
+                my >= fGlobalRndBtnY && my <= fGlobalRndBtnY + fGlobalRndBtnH)
+            {
+                doRandomiseGlobalsOnly();
+                repaint();
+                return true;
             }
 
             // Point count buttons
@@ -689,15 +812,37 @@ protected:
                 const float r  = fPointScreenR[i] + 5.0f;
                 if (dx * dx + dy * dy < r * r)
                 {
-                    fSelectedPoint = i;
+                    if (ev.mod & kModifierControl)
+                    {
+                        // Ctrl+click: toggle this point in multi-select
+                        fPointSelected[i] = !fPointSelected[i];
+                        if (fPointSelected[i])
+                            fSelectedPoint = i; // make it primary
+                    }
+                    else
+                    {
+                        // Normal click: select only this point
+                        for (int j = 0; j < 8; ++j) fPointSelected[j] = false;
+                        fPointSelected[i] = true;
+                        fSelectedPoint = i;
+                    }
                     fDraggingPoint = true;
+                    // Store starting positions for relative drag
+                    fDragStartMX = mx;
+                    fDragStartMY = my;
+                    for (int j = 0; j < 8; ++j)
+                    {
+                        fDragStartPan[j] = fPointPan[j];
+                        fDragStartOffset[j] = fPointCutoffOffset[j];
+                    }
                     syncPerPointKnobs();
                     repaint();
                     return true;
                 }
             }
 
-            // Clicked empty space — deselect
+            // Clicked empty space — deselect all
+            for (int j = 0; j < 8; ++j) fPointSelected[j] = false;
             fSelectedPoint = -1;
             repaint();
         }
@@ -748,26 +893,31 @@ protected:
             return true;
         }
 
-        // Point dragging — X=pan, Y=cutoff offset
+        // Point dragging — moves ALL selected points relative to start
         if (fDraggingPoint && fSelectedPoint >= 0)
         {
-            // Pan from X
-            float pan = (mx - fFieldX) / fFieldW * 2.0f - 1.0f;
-            if (pan < -1.0f) pan = -1.0f;
-            if (pan >  1.0f) pan =  1.0f;
-            fPointPan[fSelectedPoint] = pan;
-            setParameterValue(ppIdx(fSelectedPoint, kPPPan), pan);
+            // Calculate delta in normalised space
+            const float deltaPan = (mx - fDragStartMX) / fFieldW * 2.0f;
+            const float deltaOffset = -(my - fDragStartMY) / fFieldH * 48.0f;
 
-            // Cutoff offset from Y: centre=0, up=+24, down=-24
-            float normY = 1.0f - (my - fFieldY) / fFieldH; // 0=bottom, 1=top
-            float offset = (normY - 0.5f) * 48.0f; // map 0.5 centre → 0, top → +24, bottom → -24
-            if (offset < -24.0f) offset = -24.0f;
-            if (offset >  24.0f) offset =  24.0f;
-            fPointCutoffOffset[fSelectedPoint] = offset;
-            // Remember which zone the point is in
-            if (offset > 0.0f)       fPointCutoffZone[fSelectedPoint] =  1;
-            else if (offset < 0.0f)  fPointCutoffZone[fSelectedPoint] = -1;
-            setParameterValue(ppIdx(fSelectedPoint, kPPCutoffOffset), offset);
+            for (int i = 0; i < fPointCount; ++i)
+            {
+                if (!fPointSelected[i]) continue;
+
+                float newPan = fDragStartPan[i] + deltaPan;
+                if (newPan < -1.0f) newPan = -1.0f;
+                if (newPan >  1.0f) newPan =  1.0f;
+                fPointPan[i] = newPan;
+                setParameterValue(ppIdx(i, kPPPan), newPan);
+
+                float newOffset = fDragStartOffset[i] + deltaOffset;
+                if (newOffset < -24.0f) newOffset = -24.0f;
+                if (newOffset >  24.0f) newOffset =  24.0f;
+                fPointCutoffOffset[i] = newOffset;
+                if (newOffset > 0.0f)       fPointCutoffZone[i] =  1;
+                else if (newOffset < 0.0f)  fPointCutoffZone[i] = -1;
+                setParameterValue(ppIdx(i, kPPCutoffOffset), newOffset);
+            }
 
             syncPerPointKnobs();
             repaint();
@@ -859,49 +1009,105 @@ private:
 
     void doUIRandomise()
     {
-        // Simple LCG random for UI-side randomisation
+        // Simple LCG random helpers — use upper bits for better distribution
         fRngState = fRngState * 1103515245u + 12345u;
         auto rndFloat = [&](float mn, float mx) -> float {
             fRngState = fRngState * 1103515245u + 12345u;
-            const float t = static_cast<float>(fRngState & 0xFFFF) / 65535.0f;
+            const float t = static_cast<float>((fRngState >> 8) & 0xFFFF) / 65535.0f;
             return mn + t * (mx - mn);
         };
         auto rndInt = [&](int mn, int mx) -> int {
             fRngState = fRngState * 1103515245u + 12345u;
-            return mn + static_cast<int>(fRngState % static_cast<uint32_t>(mx - mn + 1));
+            return mn + static_cast<int>((fRngState >> 16) % static_cast<uint32_t>(mx - mn + 1));
         };
 
+        doRandomiseGlobals(rndFloat);
+        for (int i = 0; i < 8; ++i)
+            doRandomisePoint(i, rndFloat, rndInt);
+
+        if (fSelectedPoint >= 0) syncPerPointKnobs();
+    }
+
+    void doRandomisePointOnly()
+    {
+        if (fSelectedPoint < 0) return;
+        fRngState = fRngState * 1103515245u + 12345u;
+        auto rndFloat = [&](float mn, float mx) -> float {
+            fRngState = fRngState * 1103515245u + 12345u;
+            const float t = static_cast<float>((fRngState >> 8) & 0xFFFF) / 65535.0f;
+            return mn + t * (mx - mn);
+        };
+        auto rndInt = [&](int mn, int mx) -> int {
+            fRngState = fRngState * 1103515245u + 12345u;
+            return mn + static_cast<int>((fRngState >> 16) % static_cast<uint32_t>(mx - mn + 1));
+        };
+        doRandomisePoint(fSelectedPoint, rndFloat, rndInt);
+        syncPerPointKnobs();
+    }
+
+    void doRandomiseGlobalsOnly()
+    {
+        fRngState = fRngState * 1103515245u + 12345u;
+        auto rndFloat = [&](float mn, float mx) -> float {
+            fRngState = fRngState * 1103515245u + 12345u;
+            const float t = static_cast<float>((fRngState >> 8) & 0xFFFF) / 65535.0f;
+            return mn + t * (mx - mn);
+        };
+        doRandomiseGlobals(rndFloat);
+    }
+
+    template<typename RndF>
+    void doRandomiseGlobals(RndF& rndFloat)
+    {
+        fTexture = rndFloat(0.2f, 1.0f);
+        setParameterValue(kGlobalTexture, fTexture);
+        fGlobalKnobs[0].value = fTexture;
+
+        fResonance = rndFloat(0.3f, 8.0f);
+        setParameterValue(kGlobalResonance, fResonance);
+        fGlobalKnobs[1].value = fResonance;
+
+        fFeedback = rndFloat(0.1f, 0.8f);
+        setParameterValue(kGlobalFeedback, fFeedback);
+        fGlobalKnobs[2].value = fFeedback;
+
+        fPitchShift = rndFloat(-12.0f, 12.0f);
+        setParameterValue(kGlobalPitchShift, fPitchShift);
+        fGlobalKnobs[3].value = fPitchShift;
+
+        fGlideTime = rndFloat(50.0f, 800.0f);
+        setParameterValue(kGlobalGlideTime, fGlideTime);
+        fGlobalKnobs[7].value = fGlideTime;
+    }
+
+    template<typename RndF, typename RndI>
+    void doRandomisePoint(int i, RndF& rndFloat, RndI& rndInt)
+    {
         const bool harmonic = (fHarmonicMode > 0.5f);
 
-        for (int i = 0; i < 8; ++i)
+        if (!harmonic)
         {
-            // Cutoff offset (only in random mode)
-            if (!harmonic)
-            {
-                const float offset = rndFloat(-24.0f, 24.0f);
-                fPointCutoffOffset[i] = offset;
-                fPointCutoffZone[i] = (offset >= 0.0f) ? 1 : -1;
-                setParameterValue(ppIdx(i, kPPCutoffOffset), offset);
-            }
-
-            // Filter type
-            const float ft = static_cast<float>(rndInt(0, 3));
-            fPointFilterType[i] = ft;
-            setParameterValue(ppIdx(i, kPPFilterType), ft);
-
-            // Feedback
-            const float fb = rndFloat(0.0f, 0.7f);
-            fPointFeedback[i] = fb;
-            setParameterValue(ppIdx(i, kPPFeedback), fb);
-
-            // Pitch shift
-            const float ps = rndFloat(-12.0f, 12.0f);
-            fPointPitchShift[i] = ps;
-            setParameterValue(ppIdx(i, kPPPitchShift), ps);
+            const float offset = rndFloat(-24.0f, 24.0f);
+            fPointCutoffOffset[i] = offset;
+            fPointCutoffZone[i] = (offset >= 0.0f) ? 1 : -1;
+            setParameterValue(ppIdx(i, kPPCutoffOffset), offset);
         }
 
-        // Sync per-point knobs if one is selected
-        if (fSelectedPoint >= 0) syncPerPointKnobs();
+        const float ft = static_cast<float>(rndInt(0, 3));
+        fPointFilterType[i] = ft;
+        setParameterValue(ppIdx(i, kPPFilterType), ft);
+
+        const float fb = rndFloat(0.0f, 0.7f);
+        fPointFeedback[i] = fb;
+        setParameterValue(ppIdx(i, kPPFeedback), fb);
+
+        const float ps = rndFloat(-12.0f, 12.0f);
+        fPointPitchShift[i] = ps;
+        setParameterValue(ppIdx(i, kPPPitchShift), ps);
+
+        const float pan = rndFloat(-1.0f, 1.0f);
+        fPointPan[i] = pan;
+        setParameterValue(ppIdx(i, kPPPan), pan);
     }
 
     void syncKnobToState(const Knob& k)
@@ -937,11 +1143,17 @@ private:
 
     // ── State ─────────────────────────────────────────────────────────────
     int    fFontId { -1 };
+    NanoImage fBgImage;
     int    fPointCount { 2 };
-    int    fSelectedPoint { -1 };
+    int    fSelectedPoint { -1 };   // primary selection (shown in panel)
+    bool   fPointSelected[8] {};    // multi-select set
     bool   fDraggingPoint { false };
     float  fDragStartY { 0.0f };
     float  fDragStartValue { 0.0f };
+    float  fDragStartMX { 0.0f };      // mouse X at drag start
+    float  fDragStartMY { 0.0f };      // mouse Y at drag start
+    float  fDragStartPan[8] {};        // each point's pan at drag start
+    float  fDragStartOffset[8] {};     // each point's cutoff offset at drag start
     Knob*  fActiveKnob { nullptr };
 
     // Field geometry (stored for hit testing)
@@ -959,10 +1171,17 @@ private:
     // Filter type button positions
     float fFilterBtnX{0}, fFilterBtnY{0}, fFilterBtnW{0}, fFilterBtnH{0};
 
+    // Per-point RND button position
+    float fPPRndBtnX{0}, fPPRndBtnY{0}, fPPRndBtnW{0}, fPPRndBtnH{0};
+
+    // Global RND button position
+    float fGlobalRndBtnX{0}, fGlobalRndBtnY{0}, fGlobalRndBtnW{0}, fGlobalRndBtnH{0};
+
     // Global params mirrored
     float fTexture{0.5f}, fResonance{0.707f}, fFeedback{0.3f};
     float fPitchShift{0}, fWetDry{1}, fInputGain{0}, fOutputGain{0};
     float fHarmonicMode{0}, fGlideTime{200};
+    float fWavePhase{0}; // animation counter for waveform display
 
     // Per-point params mirrored
     float fPointFilterType[8]{};
