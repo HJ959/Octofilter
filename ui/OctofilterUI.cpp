@@ -94,8 +94,22 @@ public:
     OctofilterUI()
         : UI(kDefaultWidth, kDefaultHeight)
     {
+        fScale = getScaleFactor();
+        if (fScale < 1.0f) fScale = 1.0f;
+
         fFontId = createFontFromMemory("inter", kInterFontData, kInterFontDataSize, false);
-        setGeometryConstraints(600, 400, true);
+
+        // Apply scale to window constraints
+        setGeometryConstraints(
+            static_cast<uint>(600 * fScale),
+            static_cast<uint>(400 * fScale), true);
+
+        if (fScale > 1.0f)
+        {
+            const uint sw = static_cast<uint>(kDefaultWidth * fScale);
+            const uint sh = static_cast<uint>(kDefaultHeight * fScale);
+            setSize(sw, sh);
+        }
         setupGlobalKnobs();
         setupPerPointKnobs();
 
@@ -207,9 +221,9 @@ protected:
         const float btnH = 18.0f;
         const float btnY = h * 0.5f - btnH * 0.5f;
 
-        // ── Randomise button (after title) ────────────────────────────────
+        // ── Randomise All button (after title) ────────────────────────────
         const float rndX = 120.0f;
-        const float rndW = 60.0f;
+        const float rndW = 75.0f;
         fRandomiseBtnX = rndX;
         fRandomiseBtnY = btnY;
         fRandomiseBtnW = rndW;
@@ -219,7 +233,11 @@ protected:
         roundedRect(rndX, btnY, rndW, btnH, 3.0f);
         fillColor(Palette::highlight);
         fill();
-        fontSize(10.0f);
+        // Bright outline for prominence
+        strokeColor(Palette::text);
+        strokeWidth(1.0f);
+        stroke();
+        fontSize(12.0f);
         fillColor(Palette::bg);
         textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
         text(rndX + rndW * 0.5f, btnY + btnH * 0.5f, "RND ALL", nullptr);
@@ -347,10 +365,11 @@ protected:
                 stroke();
             }
 
-            // Node fill
+            // Node fill — dim when feedback is very low (visual hint that feedback activates the effect)
+            const float nodeOpacity = (fFeedback < 0.05f) ? 0.35f : 1.0f;
             beginPath();
             circle(px, py, fbSize);
-            fillColor(nodeColor);
+            fillColor(Color(nodeColor.red, nodeColor.green, nodeColor.blue, nodeOpacity));
             fill();
 
             // Pitch shift ring
@@ -485,7 +504,7 @@ protected:
         text(x + 8.0f, row1Y - 12.0f, "FILTER", nullptr);
 
         // Knob size
-        const float knobR = 22.0f;
+        const float knobR = 24.0f;
 
         // Row 1: Filter Type buttons + Q + Cutoff
         // Filter type as 4 clickable buttons: [LP] [HP] [BP] [NT]
@@ -559,7 +578,7 @@ protected:
         fillColor(Color(0.12f, 0.12f, 0.12f));
         fill();
 
-        const float knobR = 20.0f;
+        const float knobR = 24.0f;
         const float cy = y + h * 0.5f + 2.0f;
 
         // Group positions: FILTER | EFFECT | OUTPUT
@@ -671,7 +690,7 @@ protected:
         fill();
 
         // Label
-        fontSize(11.0f);
+        fontSize(13.0f);
         fontFaceId(fFontId);
         fillColor(Palette::text);
         textAlign(ALIGN_CENTER | ALIGN_TOP);
@@ -746,7 +765,7 @@ protected:
             if (mx >= fPtCountMinusX && mx <= fPtCountMinusX + fPtCountBtnSize &&
                 my >= fPtCountBtnY && my <= fPtCountBtnY + fPtCountBtnSize)
             {
-                if (fPointCount > 2)
+                if (fPointCount > 1)
                 {
                     fPointCount--;
                     setParameterValue(kGlobalPointCount, static_cast<float>(fPointCount));
@@ -1143,6 +1162,7 @@ private:
 
     // ── State ─────────────────────────────────────────────────────────────
     int    fFontId { -1 };
+    float  fScale { 1.0f };
     NanoImage fBgImage;
     int    fPointCount { 2 };
     int    fSelectedPoint { -1 };   // primary selection (shown in panel)

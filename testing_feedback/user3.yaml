@@ -1,0 +1,36 @@
+Instagram: "https://www.instagram.com/nicholasfaris"
+
+feedback: |
+  Positives
+  - Adds "nice colour and shapes" to basic sounds — unexpected results from simple source material
+  - Not just a typical delay/filter chain — feels unique and different
+  - Really fun when feedback is turned up with multiple nodes
+  - Made a styled chord thing that sounded "really cool"
+  - Planning to make a 1.5 minute loop to share
+  - Overall: "wicked", "very unique", "coming through really nicely"
+  - Shared the plugin with a friend who works as a professional plugin developer
+  
+  Potential Bugs / Issues
+  
+  1. Bypass resets sound state — when bypassing and un-bypassing the plugin, some nodes seem to "reset" their sound character (not the settings, but the
+  internal DSP state). Likely the feedback buffers/pitch shifter clearing when audio stops flowing through.
+  2. Q + Feedback + Pitch = piercing volume spikes — when Q is set around 30%+, feedback is up, and pitch shift goes to higher values, the output becomes "quite
+  spiky" and piercing. The limiter may not be catching resonant peaks fast enough, or Q is too aggressive at those settings.
+  
+  UX / Discoverability Issues
+  
+  3. Node controls only audible with feedback up — wasn't obvious initially that filter type, cutoff, and Q changes only become noticeable when feedback is
+  engaged. The effect of individual nodes feels minimal without feedback.
+  4. UI clarity — suggests "tidying up" the interface to make things "a little bit more obvious" and easier to get going quickly, while keeping the
+  unpredictable/fun elements.
+  
+  Suggestions
+  
+  - Limit the Q amount more (or add a softer ceiling) to prevent piercing resonance at high pitch + high feedback
+  - Make it clearer that feedback is the "activation energy" for hearing node differences
+
+response: |
+  Yes I agree with the limit the Q amount more, maybe adding a softer ceiling is a good idea as avoiding those piercing resonances is what I'm after
+  Yes good idea, activation energy sounds good.
+  And any bugs that are potentially there sort out.
+  As for UI its covered in other users feedback too, but the MacOS version the knobs are tiny compared to windows.

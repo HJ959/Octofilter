@@ -124,7 +124,7 @@ void OctofilterPlugin::initParameter(uint32_t index, Parameter& p)
     if (index == kGlobalPointCount)
     {
         p.name = "Point Count"; p.symbol = "point_count";
-        p.ranges.min = 2.0f; p.ranges.max = 8.0f; p.ranges.def = 2.0f;
+        p.ranges.min = 1.0f; p.ranges.max = 8.0f; p.ranges.def = 2.0f;
         p.hints = kParameterIsAutomatable | kParameterIsInteger;
         return;
     }
@@ -320,7 +320,7 @@ void OctofilterPlugin::setParameterValue(uint32_t index, float value)
     case kGlobalPointCount:
     {
         const int n = static_cast<int>(value + 0.5f);
-        mActivePoints = (n < 2) ? 2 : (n > 8) ? 8 : n;
+        mActivePoints = (n < 1) ? 1 : (n > 8) ? 8 : n;
         rebuildRouting();
         updateFilterParams();
         return;
@@ -579,11 +579,21 @@ void OctofilterPlugin::run(const float** inputs, float** outputs, uint32_t frame
     for (int i = 0; i < mActivePoints; ++i)
     {
         const float glidedCutoff = mGlide[i].advance();
-        const float q = (mPointQ[i] > 0.0f) ? mPointQ[i] : mResonance;
+        float q = (mPointQ[i] > 0.0f) ? mPointQ[i] : mResonance;
+
+        // Dynamic Q ceiling: reduce Q when feedback×pitch is high to prevent piercing
+        const float totalPitch = mPointPitchShift[i] + mPitchShift;
+        const float fbPitchDanger = mFeedback * (std::fabs(totalPitch) / 24.0f);
+        if (fbPitchDanger > 0.2f)
+        {
+            // Scale Q down: at max danger (fb=1, pitch=24) Q is capped to ~2
+            const float qCeiling = 20.0f * (1.0f - fbPitchDanger * 0.9f);
+            if (q > qCeiling) q = qCeiling;
+        }
+
         mPoints[i].applyFilterParams(glidedCutoff, q);
 
         // Apply global pitch shift as offset on top of per-point pitch
-        const float totalPitch = mPointPitchShift[i] + mPitchShift;
         mPoints[i].setPitchShift(totalPitch);
     }
 

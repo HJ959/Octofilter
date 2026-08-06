@@ -1,12 +1,9 @@
-not yet, makes sense so 7/8 are finishing up a production-izing the plugin gotcha. In that case next session I will focus on the sound abit more, and finalise
-  any UI tweaks, I'll also try to provide some PNGs, how should I prepare these and what folder should I put them in?
-   
   Folder: ui/skins/ — put all your PNGs there.
   
   How to prepare them:
   
-  1. Size: Design at 2× resolution (1400×900 px for a full background at our 700×450 default window). NanoVG will scale down cleanly.
-  2. Format: PNG with transparency (RGBA). Use transparent backgrounds so textures can overlay the drawn UI.
+  1. Size: 1400×900 px 
+  2. Format: PNG with transparency (RGBA)
   3. What to make:
     - background.png — full-window texture (paper grain, noise, subtle pattern)
     - field_bg.png — texture for the stereo field canvas area
@@ -19,12 +16,6 @@ not yet, makes sense so 7/8 are finishing up a production-izing the plugin gotch
     - Dark textures (grain, scratches) → use normal blend with low opacity (20-40%)
     - Colour washes → use normal blend with the texture as a semi-transparent overlay
   
-  5. Keep files small — under 500KB each ideally. Large PNGs increase plugin load time.
+  5. 500KB each ideally
   6. Naming: keep it simple — background.png, noise_overlay.png, field_texture.png etc.
   
-  When you've placed them in ui/skins/, I'll wire them up: embed them as C arrays (like the font), load with createImageFromMemory(), and draw them with the
-  appropriate blend mode at the right positions.
-  
-  Enjoy the sound design session next time — da iawn heddiw! 🌸
-
-▸ Credits: 0.90 • Time: 15s

@@ -320,6 +320,49 @@ or destroy it manually.
 
 ---
 
+## Phase 6d — User Testing Feedback Fixes
+
+**Goal:** Address bugs, UX issues, and quick wins from first round of user testing (3 users).
+
+### Bugs
+
+- [ ] **Fix Q ceiling / piercing resonance** — when Q is high + feedback is high + pitch shift is
+  up, the output becomes dangerously piercing. Fix: apply a soft ceiling to Q that reduces
+  automatically when feedback × pitch shift is high. Or: add a secondary limiter specifically on
+  the filter resonance output before it enters the feedback path.
+- [ ] **Preserve DSP state on bypass** — feedback buffers and pitch shifter state clear when the
+  plugin is bypassed, losing the evolved sound character. Fix: don't reset buffers on
+  deactivate/bypass. Only reset on explicit user action (Randomise) or project load.
+- [ ] **Allow 1 point minimum** — change point count range from 2–8 to 1–8. Enables simpler
+  use cases (single filtered feedback with automation).
+
+### UI / UX
+
+- [ ] **macOS UI scaling** — knobs and text are tiny on Mac (Retina). DPF provides
+  `getScaleFactor()` — multiply all sizes by this factor. Test on both 1× and 2× displays.
+- [ ] **Increase base knob/text sizes** — general 15-20% size bump across all UI elements.
+  Reduce empty space, make controls fill the available area better.
+- [ ] **Make Randomise more prominent** — larger button, brighter colour, maybe a brief visual
+  flash/pulse animation on click to confirm it fired.
+- [ ] **Feedback "activation" indicator** — when feedback=0, dim the point nodes or show a subtle
+  label/tooltip indicating "increase feedback to hear filter differences". Helps discoverability.
+- [ ] **Hover tooltips (stretch)** — an "i" button in the top bar toggles tooltip mode. When
+  active, hovering over any knob/button shows a short description of what it does. Low priority
+  but high usability value.
+
+### Feature
+
+- [ ] **Single point mode** — point count minimum changed to 1. Ensure the DSP, UI stereo field,
+  and per-point panel all work correctly with a single point.
+
+**Dependencies:** Phase 6c complete.
+
+**Effort estimate:** ~2 days total.
+
+**User testing sources:** @cosmojamsoun (User 1), @estero_connor (User 2), @nicholasfaris (User 3)
+
+---
+
 ## Phase 7 — Integration & Polish
 
 **Goal:** Plugin sounds good, performs within CPU budget, ships clean.
@@ -416,7 +459,8 @@ or destroy it manually.
 | 4 | Full parameter set, state save/restore | ✅ Complete (69 params, 59 visible) |
 | 5 | Harmonic mode with per-point glide | ✅ Complete |
 | 6 | Complete UI | 🔶 In progress (core layout done, iterating) |
-| 6c | UI iteration from user feedback | 🔲 Next |
+| 6c | UI iteration from user feedback | ✅ Complete |
+| 6d | User testing feedback fixes | 🔲 Next |
 | 7 | Integration, CPU budget, AU/DAW validation | 🔲 |
 | 8 | Test suite, QA, release | 🔲 |
 | 9 | Presets, menu, distribution | 🔲 |
