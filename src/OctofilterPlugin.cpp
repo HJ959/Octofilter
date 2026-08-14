@@ -13,9 +13,14 @@
 
 START_NAMESPACE_DISTRHO
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+// Feedback headroom: allows feedback above unity for creative self-oscillation.
+// Protected by per-point and output limiters.
+static constexpr float kFeedbackHeadroom = 1.1f;
+
 // ── Parameter index scheme ────────────────────────────────────────────────────
-// Global params: indices 0–10
-// Per-point params: indices 11–66 (7 params × 8 points)
+// Global params: indices 0–11
+// Per-point params: indices 12–67 (7 params × 8 points)
 enum GlobalParams : uint32_t
 {
     kGlobalPointCount   = 0,
@@ -30,7 +35,7 @@ enum GlobalParams : uint32_t
     kGlobalWetDry       = 9,
     kGlobalRandomise    = 10,
     kGlobalHarmonicMode = 11,
-    kGlobalGlideTime    = 12,
+    kGlobalStereoCollapse = 12,
 };
 
 enum PerPointOffset : uint32_t
@@ -60,16 +65,29 @@ OctofilterPlugin::OctofilterPlugin()
     {
         mPointFilterType[i]   = 0.0f;  // LP
         mPointCutoffOffset[i] = 0.0f;
-        mPointQ[i]            = 0.0f;  // 0 = use global
+        mPointQ[i]            = 5.0f;
         mPointLevel[i]        = 1.0f;
-        mPointFeedback[i]     = 0.0f;
+        mPointFeedback[i]     = 0.7f;
         mPointPitchShift[i]   = 0.0f;
+
+        // Sync to DSP state (apply feedback curve)
+        mPoints[i].feedbackAmount = std::pow(mPointFeedback[i] / 1.1f, 0.6f) * 1.1f;
+        mPoints[i].level = mPointLevel[i];
+        mPoints[i].filterType = Octofilter::BiQuadFilter::Type::LowPass;
     }
 
     // Spread pan positions evenly
     rebuildRouting();
     updateFilterParams();
     prepareAllPoints();
+
+    // Seed smoothers immediately so feedback works from first sample
+    mSmTexture.set(mTexture);
+    mSmFeedback.set(std::pow(mFeedback, 0.6f));
+    mSmPitchShift.set(mPitchShift);
+    mSmWetDry.set(mWetDry);
+    mSmInputGain.set(mInputGainLin);
+    mSmOutputGain.set(mOutputGainLin);
 }
 
 // ── activate ──────────────────────────────────────────────────────────────────
@@ -85,16 +103,16 @@ void OctofilterPlugin::activate()
 
     // Set smoother coefficients
     const float sr = static_cast<float>(mSampleRate);
-    mSmTexture.setTargetRate(sr);
-    mSmFeedback.setTargetRate(sr);
-    mSmPitchShift.setTargetRate(sr);
-    mSmWetDry.setTargetRate(sr);
-    mSmInputGain.setTargetRate(sr);
-    mSmOutputGain.setTargetRate(sr);
+    mSmTexture.setBlockRate(sr, 512);
+    mSmFeedback.setBlockRate(sr, 512);
+    mSmPitchShift.setBlockRate(sr, 512);
+    mSmWetDry.setTargetRate(sr);  // per-sample for click-free crossfade
+    mSmInputGain.setBlockRate(sr, 512);
+    mSmOutputGain.setBlockRate(sr, 512);
 
     // Seed smoothers with current values
     mSmTexture.set(mTexture);
-    mSmFeedback.set(mFeedback);
+    mSmFeedback.set(std::pow(mFeedback, 0.6f));
     mSmPitchShift.set(mPitchShift);
     mSmWetDry.set(mWetDry);
     mSmInputGain.set(mInputGainLin);
@@ -109,12 +127,12 @@ void OctofilterPlugin::sampleRateChanged(double newSampleRate)
     updateFilterParams();
 
     const float sr = static_cast<float>(newSampleRate);
-    mSmTexture.setTargetRate(sr);
-    mSmFeedback.setTargetRate(sr);
-    mSmPitchShift.setTargetRate(sr);
+    mSmTexture.setBlockRate(sr, 512);
+    mSmFeedback.setBlockRate(sr, 512);
+    mSmPitchShift.setBlockRate(sr, 512);
     mSmWetDry.setTargetRate(sr);
-    mSmInputGain.setTargetRate(sr);
-    mSmOutputGain.setTargetRate(sr);
+    mSmInputGain.setBlockRate(sr, 512);
+    mSmOutputGain.setBlockRate(sr, 512);
 }
 
 // ── initParameter ─────────────────────────────────────────────────────────────
@@ -150,7 +168,7 @@ void OctofilterPlugin::initParameter(uint32_t index, Parameter& p)
     {
         p.name = "Resonance"; p.symbol = "resonance";
         p.ranges.min = 0.1f; p.ranges.max = 20.0f; p.ranges.def = 0.707f;
-        p.hints = kParameterIsAutomatable; return;
+        p.hints = kParameterIsHidden; return;
     }
     if (index == kGlobalFeedback)
     {
@@ -196,11 +214,11 @@ void OctofilterPlugin::initParameter(uint32_t index, Parameter& p)
         p.hints = kParameterIsAutomatable | kParameterIsBoolean | kParameterIsInteger;
         return;
     }
-    if (index == kGlobalGlideTime)
+    if (index == kGlobalStereoCollapse)
     {
-        p.name = "Glide Time"; p.symbol = "glide_time"; p.unit = "ms";
-        p.ranges.min = 10.0f; p.ranges.max = 2000.0f; p.ranges.def = 200.0f;
-        p.hints = kParameterIsAutomatable | kParameterIsLogarithmic;
+        p.name = "Stereo Width"; p.symbol = "stereo_collapse";
+        p.ranges.min = 0.0f; p.ranges.max = 1.0f; p.ranges.def = 1.0f;
+        p.hints = kParameterIsAutomatable;
         return;
     }
 
@@ -219,7 +237,7 @@ void OctofilterPlugin::initParameter(uint32_t index, Parameter& p)
             std::snprintf(name, sizeof(name), "P%d Filter Type", point + 1);
             std::snprintf(sym,  sizeof(sym),  "p%d_filter_type", point + 1);
             p.name = name; p.symbol = sym;
-            p.ranges.min = 0.0f; p.ranges.max = 3.0f; p.ranges.def = 0.0f;
+            p.ranges.min = 0.0f; p.ranges.max = 2.0f; p.ranges.def = 0.0f;
             p.hints = kParameterIsAutomatable | kParameterIsInteger;
             break;
         case kPPCutoffOffset:
@@ -233,7 +251,7 @@ void OctofilterPlugin::initParameter(uint32_t index, Parameter& p)
             std::snprintf(name, sizeof(name), "P%d Q", point + 1);
             std::snprintf(sym,  sizeof(sym),  "p%d_q", point + 1);
             p.name = name; p.symbol = sym;
-            p.ranges.min = 0.0f; p.ranges.max = 20.0f; p.ranges.def = 0.0f;
+            p.ranges.min = 2.5f; p.ranges.max = 20.0f; p.ranges.def = 5.0f;
             p.hints = kParameterIsAutomatable;
             break;
         case kPPPan:
@@ -254,7 +272,7 @@ void OctofilterPlugin::initParameter(uint32_t index, Parameter& p)
             std::snprintf(name, sizeof(name), "P%d Feedback", point + 1);
             std::snprintf(sym,  sizeof(sym),  "p%d_feedback", point + 1);
             p.name = name; p.symbol = sym;
-            p.ranges.min = 0.0f; p.ranges.max = 1.0f; p.ranges.def = 0.0f;
+            p.ranges.min = 0.0f; p.ranges.max = 1.1f; p.ranges.def = 0.7f;
             p.hints = kParameterIsAutomatable;
             break;
         case kPPPitchShift:
@@ -274,7 +292,7 @@ float OctofilterPlugin::getParameterValue(uint32_t index) const
 {
     switch (index)
     {
-    case kGlobalPointCount:    return static_cast<float>(mActivePoints);
+    case kGlobalPointCount:    return static_cast<float>(mTargetPoints);
     case kGlobalTexture:       return mTexture;
     case kGlobalTextureSpread: return mTextureSpread;
     case kGlobalSpread:        return mSpread;
@@ -286,7 +304,7 @@ float OctofilterPlugin::getParameterValue(uint32_t index) const
     case kGlobalWetDry:        return mWetDry;
     case kGlobalRandomise:     return 0.0f;
     case kGlobalHarmonicMode:  return mHarmonicMode;
-    case kGlobalGlideTime:     return mGlideTimeMs;
+    case kGlobalStereoCollapse: return mStereoCollapse;
     default: break;
     }
 
@@ -320,9 +338,15 @@ void OctofilterPlugin::setParameterValue(uint32_t index, float value)
     case kGlobalPointCount:
     {
         const int n = static_cast<int>(value + 0.5f);
-        mActivePoints = (n < 1) ? 1 : (n > 8) ? 8 : n;
-        rebuildRouting();
-        updateFilterParams();
+        mTargetPoints = (n < 1) ? 1 : (n > 8) ? 8 : n;
+        // If increasing, activate new points immediately (fade them in)
+        if (mTargetPoints > mActivePoints)
+        {
+            mActivePoints = mTargetPoints;
+            rebuildRouting();
+            updateFilterParams();
+        }
+        // If decreasing, run() will fade them out and then reduce mActivePoints
         return;
     }
     case kGlobalTexture:
@@ -368,11 +392,8 @@ void OctofilterPlugin::setParameterValue(uint32_t index, float value)
         mHarmonicMode = value;
         updateFilterParams();
         return;
-    case kGlobalGlideTime:
-        mGlideTimeMs = value;
-        for (int i = 0; i < 8; ++i)
-            mGlide[i].setGlideTime(mGlideTimeMs,
-                                    static_cast<float>(mSampleRate), 512);
+    case kGlobalStereoCollapse:
+        mStereoCollapse = value;
         return;
     default: break;
     }
@@ -415,7 +436,8 @@ void OctofilterPlugin::setParameterValue(uint32_t index, float value)
             return;
         case kPPFeedback:
             mPointFeedback[point] = value;
-            mPoints[point].feedbackAmount = value * 1.3f;
+            // Exponential curve: knob midpoint gives ~66% feedback (more time in the sweet spot)
+            mPoints[point].feedbackAmount = std::pow(value / 1.1f, 0.6f) * 1.1f;
             return;
         case kPPPitchShift:
             mPointPitchShift[point] = value;
@@ -440,32 +462,41 @@ void OctofilterPlugin::setState(const char* key, const char* value)
     if (std::strcmp(key, "octofilter_state") != 0) return;
 
     PendingState ps;
-    // Parse simple key=value lines: "co0=-3.5\nco1=7.2\n..." etc.
+    // Parse simple key=value lines
     const char* p = value;
     while (*p)
     {
         char kbuf[32] = {}, vbuf[32] = {};
         int ki = 0, vi = 0;
-        while (*p && *p != '=') kbuf[ki++] = *p++;
+        while (*p && *p != '=' && ki < 31) kbuf[ki++] = *p++;
         if (*p == '=') ++p;
-        while (*p && *p != '\n') vbuf[vi++] = *p++;
+        while (*p && *p != '\n' && vi < 31) vbuf[vi++] = *p++;
         if (*p == '\n') ++p;
 
-        // Cutoff offsets: co0..co7
-        if (kbuf[0] == 'c' && kbuf[1] == 'o' && kbuf[2] >= '0' && kbuf[2] <= '7')
+        // Globals
+        if (std::strcmp(kbuf, "texture") == 0)   { ps.texture = static_cast<float>(std::atof(vbuf)); ps.hasGlobals = true; }
+        else if (std::strcmp(kbuf, "feedback") == 0)  ps.feedback = static_cast<float>(std::atof(vbuf));
+        else if (std::strcmp(kbuf, "pitch") == 0)     ps.pitchShift = static_cast<float>(std::atof(vbuf));
+        else if (std::strcmp(kbuf, "wetdry") == 0)    ps.wetDry = static_cast<float>(std::atof(vbuf));
+        else if (std::strcmp(kbuf, "width") == 0)     ps.stereoWidth = static_cast<float>(std::atof(vbuf));
+        else if (std::strcmp(kbuf, "harmonic") == 0)  ps.harmonicMode = static_cast<float>(std::atof(vbuf));
+        else if (std::strcmp(kbuf, "points") == 0)    ps.pointCount = std::atoi(vbuf);
+        else if (std::strcmp(kbuf, "seed") == 0)      ps.rngSeed = static_cast<uint64_t>(std::atoll(vbuf));
+        // Per-point: co0..co7, ft0..ft7, ps0..ps7, fb0..fb7, q0..q7, pn0..pn7, lv0..lv7
+        else if (kbuf[0] == 'c' && kbuf[1] == 'o' && kbuf[2] >= '0' && kbuf[2] <= '7')
             ps.cutoffOffsets[kbuf[2] - '0'] = static_cast<float>(std::atof(vbuf));
-        // Filter types: ft0..ft7
         else if (kbuf[0] == 'f' && kbuf[1] == 't' && kbuf[2] >= '0' && kbuf[2] <= '7')
             ps.filterTypes[kbuf[2] - '0'] = static_cast<float>(std::atof(vbuf));
-        // Pitch shifts: ps0..ps7
         else if (kbuf[0] == 'p' && kbuf[1] == 's' && kbuf[2] >= '0' && kbuf[2] <= '7')
             ps.pitchShifts[kbuf[2] - '0'] = static_cast<float>(std::atof(vbuf));
-        // Feedback amounts: fb0..fb7
         else if (kbuf[0] == 'f' && kbuf[1] == 'b' && kbuf[2] >= '0' && kbuf[2] <= '7')
             ps.feedbackAmts[kbuf[2] - '0'] = static_cast<float>(std::atof(vbuf));
-        // RNG seed
-        else if (std::strcmp(kbuf, "seed") == 0)
-            ps.rngSeed = static_cast<uint64_t>(std::atoll(vbuf));
+        else if (kbuf[0] == 'q' && kbuf[1] >= '0' && kbuf[1] <= '7')
+            ps.q[kbuf[1] - '0'] = static_cast<float>(std::atof(vbuf));
+        else if (kbuf[0] == 'p' && kbuf[1] == 'n' && kbuf[2] >= '0' && kbuf[2] <= '7')
+            ps.pan[kbuf[2] - '0'] = static_cast<float>(std::atof(vbuf));
+        else if (kbuf[0] == 'l' && kbuf[1] == 'v' && kbuf[2] >= '0' && kbuf[2] <= '7')
+            ps.level[kbuf[2] - '0'] = static_cast<float>(std::atof(vbuf));
     }
 
     ps.valid       = true;
@@ -477,16 +508,28 @@ String OctofilterPlugin::getState(const char* key) const
 {
     if (std::strcmp(key, "octofilter_state") != 0) return String();
 
-    char buf[1024] = {};
+    char buf[2048] = {};
     int  pos = 0;
+
+    // Globals
+    pos += std::snprintf(buf + pos, sizeof(buf) - pos,
+        "texture=%.4f\nfeedback=%.4f\npitch=%.4f\nwetdry=%.4f\n"
+        "width=%.4f\nharmonic=%.0f\npoints=%d\n",
+        mTexture, mFeedback, mPitchShift, mWetDry,
+        mStereoCollapse, mHarmonicMode, mTargetPoints);
+
+    // Per-point
     for (int i = 0; i < 8; ++i)
     {
         pos += std::snprintf(buf + pos, sizeof(buf) - pos,
-                             "co%d=%.4f\nft%d=%.0f\nps%d=%.4f\nfb%d=%.4f\n",
-                             i, mPointCutoffOffset[i],
-                             i, mPointFilterType[i],
-                             i, mPointPitchShift[i],
-                             i, mPointFeedback[i]);
+            "co%d=%.4f\nft%d=%.0f\nps%d=%.4f\nfb%d=%.4f\nq%d=%.4f\npn%d=%.4f\nlv%d=%.4f\n",
+            i, mPointCutoffOffset[i],
+            i, mPointFilterType[i],
+            i, mPointPitchShift[i],
+            i, mPointFeedback[i],
+            i, mPointQ[i],
+            i, mPointPan[i],
+            i, mPointLevel[i]);
     }
     std::snprintf(buf + pos, sizeof(buf) - pos, "seed=%llu\n",
                   static_cast<unsigned long long>(mRngSeed));
@@ -501,8 +544,8 @@ void OctofilterPlugin::doRandomise() noexcept
 
     std::uniform_real_distribution<float> offsetDist(-24.0f, 24.0f);
     std::uniform_int_distribution<int>    typeDist(0, 3);
-    std::uniform_real_distribution<float> pitchDist(-12.0f, 12.0f);
-    std::uniform_real_distribution<float> feedDist(0.0f, 0.7f);
+    std::uniform_real_distribution<float> pitchDist(-7.0f, 7.0f);
+    std::uniform_real_distribution<float> feedDist(0.4f, 0.9f);
 
     const bool harmonic = (mHarmonicMode > 0.5f);
 
@@ -525,7 +568,7 @@ void OctofilterPlugin::doRandomise() noexcept
             static_cast<Octofilter::BiQuadFilter::Type>(
                 static_cast<int>(mPointFilterType[i]));
         mPoints[i].setPitchShift(mPointPitchShift[i]);
-        mPoints[i].feedbackAmount = mPointFeedback[i] * 1.3f;
+        mPoints[i].feedbackAmount = std::pow(mPointFeedback[i] / 1.1f, 0.6f) * 1.1f;
 
         // Notify UI of changed values
         requestParameterValueChange(
@@ -546,21 +589,58 @@ void OctofilterPlugin::applyPendingState() noexcept
     const PendingState& ps = mPendingState;
     mRngSeed = ps.rngSeed;
 
+    // Restore globals (if present in the state data — backwards compat)
+    if (ps.hasGlobals)
+    {
+        mTexture = ps.texture;
+        mFeedback = ps.feedback;
+        mPitchShift = ps.pitchShift;
+        mWetDry = ps.wetDry;
+        mStereoCollapse = ps.stereoWidth;
+        mHarmonicMode = ps.harmonicMode;
+        mTargetPoints = (ps.pointCount < 1) ? 1 : (ps.pointCount > 8) ? 8 : ps.pointCount;
+        mActivePoints = mTargetPoints;
+
+        requestParameterValueChange(kGlobalTexture, mTexture);
+        requestParameterValueChange(kGlobalFeedback, mFeedback);
+        requestParameterValueChange(kGlobalPitchShift, mPitchShift);
+        requestParameterValueChange(kGlobalWetDry, mWetDry);
+        requestParameterValueChange(kGlobalStereoCollapse, mStereoCollapse);
+        requestParameterValueChange(kGlobalHarmonicMode, mHarmonicMode);
+        requestParameterValueChange(kGlobalPointCount, static_cast<float>(mTargetPoints));
+    }
+
+    // Restore per-point
     for (int i = 0; i < 8; ++i)
     {
         mPointCutoffOffset[i] = ps.cutoffOffsets[i];
         mPointFilterType[i]   = ps.filterTypes[i];
         mPointPitchShift[i]   = ps.pitchShifts[i];
         mPointFeedback[i]     = ps.feedbackAmts[i];
+        mPointQ[i]            = ps.q[i] > 0.0f ? ps.q[i] : 5.0f;
+        mPointPan[i]          = ps.pan[i];
+        mPointLevel[i]        = ps.level[i] > 0.0f ? ps.level[i] : 1.0f;
 
         mPoints[i].cutoffOffsetSemitones = ps.cutoffOffsets[i];
         mPoints[i].filterType =
             static_cast<Octofilter::BiQuadFilter::Type>(
                 static_cast<int>(ps.filterTypes[i]));
         mPoints[i].setPitchShift(ps.pitchShifts[i]);
-        mPoints[i].feedbackAmount = ps.feedbackAmts[i] * 1.3f;
+        mPoints[i].feedbackAmount = std::pow(ps.feedbackAmts[i] / 1.1f, 0.6f) * 1.1f;
+        mPoints[i].pan = ps.pan[i];
+        mPoints[i].level = ps.level[i] > 0.0f ? ps.level[i] : 1.0f;
+
+        // Notify UI
+        requestParameterValueChange(kNumGlobalParams + i * kNumPerPointParams + 0, mPointFilterType[i]);
+        requestParameterValueChange(kNumGlobalParams + i * kNumPerPointParams + 1, mPointCutoffOffset[i]);
+        requestParameterValueChange(kNumGlobalParams + i * kNumPerPointParams + 2, mPointQ[i]);
+        requestParameterValueChange(kNumGlobalParams + i * kNumPerPointParams + 3, mPointPan[i]);
+        requestParameterValueChange(kNumGlobalParams + i * kNumPerPointParams + 4, mPointLevel[i]);
+        requestParameterValueChange(kNumGlobalParams + i * kNumPerPointParams + 5, mPointFeedback[i]);
+        requestParameterValueChange(kNumGlobalParams + i * kNumPerPointParams + 6, mPointPitchShift[i]);
     }
 
+    rebuildRouting();
     updateFilterParams();
     mHasPendingState.store(false, std::memory_order_release);
 }
@@ -575,33 +655,79 @@ void OctofilterPlugin::run(const float** inputs, float** outputs, uint32_t frame
     float* outL = outputs[0];
     float* outR = outputs[1];
 
-    // Advance per-point cutoff glide (once per block)
+    // Per-point block-rate updates: Q ceiling + global pitch offset
     for (int i = 0; i < mActivePoints; ++i)
     {
-        const float glidedCutoff = mGlide[i].advance();
-        float q = (mPointQ[i] > 0.0f) ? mPointQ[i] : mResonance;
+        float q = mPointQ[i];
 
-        // Dynamic Q ceiling: reduce Q when feedback×pitch is high to prevent piercing
-        const float totalPitch = mPointPitchShift[i] + mPitchShift;
-        const float fbPitchDanger = mFeedback * (std::fabs(totalPitch) / 24.0f);
-        if (fbPitchDanger > 0.2f)
+        // Safety Q ceiling: only kicks in at high feedback + high pitch to prevent piercing.
+        // Normal use (feedback < 0.7, moderate pitch) is unaffected.
+        const float totalPitch = mPointPitchShift[i] + mSmPitchShift.get();
+        const float fbLevel = std::pow(mFeedback, 0.6f);
+        const float pitchDanger = std::fabs(totalPitch) / 24.0f;
+        const float combinedDanger = fbLevel * 0.7f + pitchDanger * 0.3f;
+
+        // Only limit Q when combined danger is above 0.6 (high feedback + significant pitch)
+        if (combinedDanger > 0.6f)
         {
-            // Scale Q down: at max danger (fb=1, pitch=24) Q is capped to ~2
-            const float qCeiling = 20.0f * (1.0f - fbPitchDanger * 0.9f);
+            const float excess = (combinedDanger - 0.6f) / 0.4f; // 0-1 in danger zone
+            const float qCeiling = 20.0f - excess * 16.0f;       // 20 down to 4 at max danger
             if (q > qCeiling) q = qCeiling;
         }
 
-        mPoints[i].applyFilterParams(glidedCutoff, q);
+        // Re-apply Q ceiling (cutoff is already set by updateFilterParams)
+        mPoints[i].filter.setQ(q);
 
         // Apply global pitch shift as offset on top of per-point pitch
         mPoints[i].setPitchShift(totalPitch);
     }
 
-    // All globals used directly — no smoothing (glide handles cutoff transitions)
-    const float smoothFeedback = mFeedback * 1.3f;
-    const float smoothWetDry   = mWetDry;
-    const float smoothInGain   = mInputGainLin;
-    const float smoothOutGain  = mOutputGainLin;
+    // All globals smoothed per-block for zipper-free automation
+    mSmTexture.setTarget(mTexture);
+    mSmFeedback.setTarget(std::pow(mFeedback, 0.6f));
+    mSmPitchShift.setTarget(mPitchShift);
+    mSmInputGain.setTarget(mInputGainLin);
+    mSmOutputGain.setTarget(mOutputGainLin);
+
+    // Recalculate filter cutoffs from smoothed Texture each block (prevents zipper noise)
+    {
+        const float savedTexture = mTexture;
+        mTexture = mSmTexture.get();
+        updateFilterParams();
+        mTexture = savedTexture;
+    }
+
+    const float smoothFeedback = mSmFeedback.get() * kFeedbackHeadroom;
+    const float smoothInGain   = mSmInputGain.get();
+    const float smoothOutGain  = mSmOutputGain.get();
+
+    // Point fade: advance per-point fade multipliers toward target
+    // ~10ms fade at 44.1kHz/512 = ~1 block, so use a fast per-block step
+    const float fadeStep = 512.0f / (0.010f * static_cast<float>(mSampleRate)); // reach 0 in ~10ms
+    bool canReduce = true;
+    for (int i = 0; i < mActivePoints; ++i)
+    {
+        if (i < mTargetPoints)
+        {
+            // Fade in (or stay at 1)
+            mPointFade[i] += fadeStep;
+            if (mPointFade[i] > 1.0f) mPointFade[i] = 1.0f;
+        }
+        else
+        {
+            // Fade out
+            mPointFade[i] -= fadeStep;
+            if (mPointFade[i] < 0.0f) mPointFade[i] = 0.0f;
+            if (mPointFade[i] > 0.001f) canReduce = false;
+        }
+    }
+    // Once all removed points have fully faded, reduce active count
+    if (mActivePoints > mTargetPoints && canReduce)
+    {
+        mActivePoints = mTargetPoints;
+        rebuildRouting();
+        updateFilterParams();
+    }
 
     for (uint32_t f = 0; f < frames; ++f)
     {
@@ -611,9 +737,8 @@ void OctofilterPlugin::run(const float** inputs, float** outputs, uint32_t frame
         {
             Octofilter::PointState& pt = mPoints[p];
 
-            // Feedback: direct and aggressive like pre-Phase 4
-            // Global feedback applies to all points at full strength
-            const float fbAmt = smoothFeedback;
+            // Feedback: per-point × global (headroom applied once via global)
+            const float fbAmt = pt.feedbackAmount * smoothFeedback;
 
             // Input + input gain + feedback mix
             const float dryIn =
@@ -627,9 +752,11 @@ void OctofilterPlugin::run(const float** inputs, float** outputs, uint32_t frame
             // Store through feedback path
             pt.feedback.processOutput(filtered);
 
-            // Level and pan
-            const float scaled = filtered * pt.level;
-            Octofilter::StereoMixer::accumulate(scaled, pt.pan, wetL, wetR);
+            // Level, fade, and pan
+            const float scaled = filtered * pt.level * mPointFade[p];
+            // Stereo width: 0=mono (collapsed), 1=full width
+            const float effPan = pt.pan * mStereoCollapse;
+            Octofilter::StereoMixer::accumulate(scaled, effPan, wetL, wetR);
         }
 
         // Normalise by point count
@@ -641,8 +768,10 @@ void OctofilterPlugin::run(const float** inputs, float** outputs, uint32_t frame
         const float dryL = inputs[0][f];
         const float dryR = (numInputs > 1) ? inputs[1][f] : inputs[0][f];
 
-        outL[f] = (dryL * (1.0f - smoothWetDry) + wetL * smoothWetDry) * smoothOutGain;
-        outR[f] = (dryR * (1.0f - smoothWetDry) + wetR * smoothWetDry) * smoothOutGain;
+        // Advance wet/dry smoother per-sample for click-free crossfade
+        mSmWetDry.setTarget(mWetDry);
+        outL[f] = (dryL * (1.0f - mSmWetDry.get()) + wetL * mSmWetDry.get()) * smoothOutGain;
+        outR[f] = (dryR * (1.0f - mSmWetDry.get()) + wetR * mSmWetDry.get()) * smoothOutGain;
 
         // Output safety: DC block then limit to prevent ear damage
         outL[f] = mOutputLimiterL.process(mOutputDCL.process(outL[f]));
@@ -660,13 +789,10 @@ void OctofilterPlugin::rebuildRouting() noexcept
     const int numInputs = DISTRHO_PLUGIN_NUM_INPUTS;
     Octofilter::InputRouter::assign(mPoints, mActivePoints, numInputs);
 
-    // Spread interpolates per-point pan toward centre (0.0)
-    // At spread=1: point uses its full individual pan position
-    // At spread=0: all points are centred
+    // Assign pan directly — Texture handles scaling at runtime in run()
     for (int i = 0; i < mActivePoints; ++i)
     {
-        const float individualPan = mPointPan[i];
-        mPoints[i].pan = individualPan * mSpread;
+        mPoints[i].pan = mPointPan[i];
     }
 }
 
@@ -674,44 +800,37 @@ void OctofilterPlugin::updateFilterParams() noexcept
 {
     const bool harmonic = (mHarmonicMode > 0.5f);
 
-    // Texture = "openness" knob:
-    //   0 = collapsed (all filters at 20Hz, all panned centre)
-    //   1 = fully configured state (per-point positions, full spread)
-    const float openness = mTexture;
-    const float collapsedFreq = 20.0f;
+    // Texture = centre frequency control (log scale):
+    //   0 = 20 Hz (dark, everything filtered)
+    //   1 = 20 kHz (bright, fully open)
+    // Per-point offsets spread above/below in semitones.
+    const float centreFreq = 20.0f * std::pow(1000.0f, mTexture); // 20 Hz – 20 kHz log
 
     for (int i = 0; i < mActivePoints; ++i)
     {
         Octofilter::PointState& pt = mPoints[i];
-        const float q = (mPointQ[i] > 0.0f) ? mPointQ[i] : mResonance;
+        const float q = (mPointQ[i] >= 2.5f) ? mPointQ[i] : 2.5f;
 
-        float targetCutoff;
+        float cutoff;
         if (harmonic)
         {
-            // Harmonic mode: fundamental scales with openness
-            const float fundamental = collapsedFreq + openness * (
-                Octofilter::HarmonicMapper::textureToFundamental(openness) - collapsedFreq);
-            targetCutoff = Octofilter::HarmonicMapper::targetCutoff(
-                fundamental, i, mActivePoints, openness);
+            // Harmonic mode: Texture sets the fundamental, harmonics multiply above it.
+            cutoff = Octofilter::HarmonicMapper::targetCutoff(
+                centreFreq, i, mActivePoints, mTexture);
         }
         else
         {
-            // Random mode: interpolate from collapsed (20Hz) to configured position
-            const float configuredCutoff = Octofilter::TextureMapper::computeCutoff(
-                1.0f, pt.cutoffOffsetSemitones, 1.0f);
-            targetCutoff = collapsedFreq + openness * (configuredCutoff - collapsedFreq);
+            // Random mode: centre frequency + per-point semitone offset.
+            // Each point spreads above or below the centre, giving a rich
+            // spectral field. Offset ±24 semitones = ±2 octaves from centre.
+            cutoff = centreFreq * std::pow(2.0f, pt.cutoffOffsetSemitones / 12.0f);
         }
 
-        mGlide[i].setTarget(targetCutoff);
+        // Clamp to safe range
+        if (cutoff < 20.0f) cutoff = 20.0f;
+        if (cutoff > 20000.0f) cutoff = 20000.0f;
 
-        // At texture=0 (full collapse), snap instantly — don't glide
-        if (openness < 0.01f)
-            mGlide[i].snap();
-
-        pt.applyFilterParams(mGlide[i].current, q);
-
-        // Pan collapses with texture: 0=centre, 1=configured position
-        mPoints[i].pan = mPointPan[i] * openness;
+        pt.applyFilterParams(cutoff, q);
     }
 }
 
@@ -720,8 +839,6 @@ void OctofilterPlugin::prepareAllPoints() noexcept
     for (int i = 0; i < Octofilter::kMaxPoints; ++i)
     {
         mPoints[i].prepare(mSampleRate);
-        mGlide[i].setGlideTime(mGlideTimeMs, static_cast<float>(mSampleRate), 512);
-        mGlide[i].snapTo(1000.0f); // start at 1kHz, will move to target on first block
     }
 
     mOutputDCL.setSampleRate(mSampleRate);

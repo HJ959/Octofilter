@@ -639,7 +639,6 @@ TEST_CASE("ParamSmoother - instant set works")
     CHECK(sm.get() == doctest::Approx(0.75f));
 }
 
-#include "../src/CutoffGlide.hpp"
 #include "../src/HarmonicMapper.hpp"
 
 // ── HarmonicMapper tests ──────────────────────────────────────────────────────
@@ -693,46 +692,617 @@ TEST_CASE("HarmonicMapper - targetCutoff clamps to 20 kHz")
     CHECK(result == doctest::Approx(20000.0f));
 }
 
-// ── CutoffGlide tests ─────────────────────────────────────────────────────────
 
-TEST_CASE("CutoffGlide - reaches target within expected time")
+// ── CPU Benchmark ─────────────────────────────────────────────────────────────
+
+#include "../src/FeedbackEngine.hpp"
+#include "../src/PhaseVocoderShifter.hpp"
+#include "../src/DCBlocker.hpp"
+#include "../src/PeakLimiter.hpp"
+#include <chrono>
+#include <cstdio>
+
+TEST_CASE("CPU Benchmark - 8 points, full feedback + pitch, 10 seconds at 44.1kHz/512")
 {
-    Octofilter::CutoffGlide g;
-    g.snapTo(100.0f);
-    g.setGlideTime(100.0f, 44100.0f, 512); // 100ms glide
-    g.setTarget(1000.0f);
+    constexpr double sampleRate = 44100.0;
+    constexpr int blockSize = 512;
+    constexpr int numPoints = 8;
+    constexpr float duration = 10.0f; // seconds
+    constexpr int totalFrames = static_cast<int>(sampleRate * duration);
+    constexpr int numBlocks = totalFrames / blockSize;
 
-    // After 5× the glide time (~500ms), should be very close
-    const int blocksForFiveTimeConstants = static_cast<int>(
-        5.0f * 0.1f * 44100.0f / 512.0f); // 5 × 100ms
-    for (int i = 0; i < blocksForFiveTimeConstants; ++i)
-        g.advance();
+    // Set up 8 points with filters, feedback engines, and pitch shifters
+    PointState points[numPoints];
+    DCBlocker outputDCL, outputDCR;
+    PeakLimiter outputLimL, outputLimR;
 
-    CHECK(g.current == doctest::Approx(1000.0f).epsilon(0.02f));
+    outputDCL.setSampleRate(sampleRate);
+    outputDCR.setSampleRate(sampleRate);
+    outputLimL.prepare(sampleRate);
+    outputLimR.prepare(sampleRate);
+
+    for (int i = 0; i < numPoints; ++i)
+    {
+        points[i].prepare(sampleRate);
+        points[i].setPitchShift(3.0f + static_cast<float>(i)); // varied pitch shifts
+        points[i].feedbackAmount = 0.8f;
+        points[i].level = 1.0f;
+        points[i].pan = -1.0f + 2.0f * static_cast<float>(i) / static_cast<float>(numPoints - 1);
+        points[i].filterType = static_cast<BiQuadFilter::Type>(i % 4);
+        points[i].filter.setSampleRate(sampleRate);
+        points[i].filter.setType(points[i].filterType);
+        points[i].filter.setCutoff(200.0f + static_cast<float>(i) * 500.0f);
+        points[i].filter.setQ(5.0f);
+    }
+
+    // Generate white noise input
+    std::vector<float> inputBuf(blockSize);
+    std::vector<float> outL(blockSize), outR(blockSize);
+    unsigned int rng = 12345;
+
+    const float feedbackGlobal = 0.9f * 1.1f; // curved feedback × headroom
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    for (int b = 0; b < numBlocks; ++b)
+    {
+        // Fill input with white noise
+        for (int s = 0; s < blockSize; ++s)
+        {
+            rng = rng * 1664525u + 1013904223u;
+            inputBuf[s] = (static_cast<float>(rng) / 4294967296.0f - 0.5f) * 0.5f;
+        }
+
+        // Process block (mirrors run() logic)
+        for (int s = 0; s < blockSize; ++s)
+        {
+            float wetL = 0.0f, wetR = 0.0f;
+
+            for (int p = 0; p < numPoints; ++p)
+            {
+                PointState& pt = points[p];
+                const float fbAmt = pt.feedbackAmount * feedbackGlobal;
+                const float dryIn = inputBuf[s];
+                const float mixedIn = pt.feedback.mixInput(dryIn, fbAmt);
+                const float filtered = pt.filter.process(mixedIn);
+                pt.feedback.processOutput(filtered);
+
+                const float scaled = filtered * pt.level;
+                // Simple pan accumulation
+                const float panR = (pt.pan + 1.0f) * 0.5f;
+                const float panL = 1.0f - panR;
+                wetL += scaled * panL;
+                wetR += scaled * panR;
+            }
+
+            const float norm = 1.0f / static_cast<float>(numPoints);
+            wetL *= norm;
+            wetR *= norm;
+
+            outL[s] = outputLimL.process(outputDCL.process(wetL));
+            outR[s] = outputLimR.process(outputDCR.process(wetR));
+        }
+    }
+
+    auto end = std::chrono::high_resolution_clock::now();
+    double elapsedMs = std::chrono::duration<double, std::milli>(end - start).count();
+    double realtimeMs = duration * 1000.0;
+    double cpuPercent = (elapsedMs / realtimeMs) * 100.0;
+
+    std::printf("\n=== CPU BENCHMARK ===\n");
+    std::printf("  Config: %d points, feedback=0.9, pitch active, 44.1kHz/512\n", numPoints);
+    std::printf("  Duration: %.1f seconds of audio\n", duration);
+    std::printf("  Processing time: %.1f ms\n", elapsedMs);
+    std::printf("  Realtime budget: %.0f ms\n", realtimeMs);
+    std::printf("  CPU usage: %.2f%%\n", cpuPercent);
+    std::printf("  Target: <5%% — %s\n", cpuPercent < 5.0 ? "PASS" : "FAIL");
+    std::printf("=====================\n\n");
+
+    // The test passes as long as output is finite (not NaN/inf)
+    CHECK(std::isfinite(outL[0]));
+    CHECK(std::isfinite(outR[0]));
+
+    // Warn if over budget but don't fail the test (CI machines vary)
+    if (cpuPercent > 5.0)
+        MESSAGE("WARNING: CPU usage ", cpuPercent, "% exceeds 5% target");
 }
 
-TEST_CASE("CutoffGlide - snap sets immediately without glide")
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase 8 — Expanded Unit Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── HarmonicMapper: spread edge cases ─────────────────────────────────────────
+
+TEST_CASE("HarmonicMapper - spread=0.25 clusters tightly")
 {
-    Octofilter::CutoffGlide g;
-    g.snapTo(100.0f);
-    g.setGlideTime(2000.0f, 44100.0f, 512); // very slow glide
-    g.setTarget(5000.0f);
-    g.snap();
-    CHECK(g.current == doctest::Approx(5000.0f));
+    using HM = Octofilter::HarmonicMapper;
+    int maxH = 0;
+    for (int i = 0; i < 8; ++i)
+    {
+        int h = HM::harmonicNumber(i, 8, 0.25f);
+        CHECK(h >= 1);
+        if (h > maxH) maxH = h;
+    }
+    // At spread=0.25 with 8 points, max harmonic should be ~2-3
+    CHECK(maxH <= 3);
 }
 
-TEST_CASE("CutoffGlide - independent per-point movement")
+TEST_CASE("HarmonicMapper - single point returns harmonic 1")
 {
-    Octofilter::CutoffGlide g1, g2;
-    g1.snapTo(100.0f);
-    g2.snapTo(100.0f);
-    g1.setGlideTime(50.0f, 44100.0f, 512);
-    g2.setGlideTime(500.0f, 44100.0f, 512);
-    g1.setTarget(1000.0f);
-    g2.setTarget(1000.0f);
+    using HM = Octofilter::HarmonicMapper;
+    CHECK(HM::harmonicNumber(0, 1, 1.0f) == 1);
+    CHECK(HM::harmonicNumber(0, 1, 0.0f) == 1);
+}
 
-    // After 50 blocks, g1 should be much closer than g2
-    for (int i = 0; i < 50; ++i) { g1.advance(); g2.advance(); }
+TEST_CASE("HarmonicMapper - targetCutoff clamps to 20 Hz minimum")
+{
+    using HM = Octofilter::HarmonicMapper;
+    // Very low fundamental
+    const float result = HM::targetCutoff(5.0f, 0, 4, 1.0f);
+    CHECK(result >= 20.0f);
+}
 
-    CHECK(g1.current > g2.current); // g1 faster, closer to target
+// ── Q Ceiling: output stays bounded ──────────────────────────────────────────
+
+TEST_CASE("Q ceiling - high feedback + high pitch + high Q produces finite bounded output")
+{
+    // Simulate the worst case: max Q, max feedback, max pitch shift
+    PointState pt;
+    pt.prepare(44100.0);
+    pt.filterType = BiQuadFilter::Type::BandPass;
+    pt.filter.setSampleRate(44100.0);
+    pt.filter.setType(BiQuadFilter::Type::BandPass);
+    pt.filter.setCutoff(1000.0f);
+    pt.filter.setQ(20.0f); // max Q
+    pt.setPitchShift(24.0f); // max pitch
+    pt.feedbackAmount = 1.1f; // max per-point
+    pt.level = 1.0f;
+
+    // Process 44100 samples (1 second) with white noise
+    unsigned int rng = 99999;
+    float maxOut = 0.0f;
+    for (int s = 0; s < 44100; ++s)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        float noise = (static_cast<float>(rng) / 4294967296.0f - 0.5f) * 0.5f;
+
+        // Apply Q ceiling logic (same as run())
+        float q = 20.0f;
+        const float pitchDanger = 24.0f / 24.0f; // 1.0
+        const float fbLevel = 1.0f; // max
+        const float combinedDanger = fbLevel * 0.7f + pitchDanger * 0.3f; // 1.0
+        const float excess = (combinedDanger - 0.6f) / 0.4f; // 1.0
+        const float qCeiling = 20.0f - excess * 16.0f; // 4.0
+        if (q > qCeiling) q = qCeiling;
+        pt.filter.setQ(q);
+
+        const float mixedIn = pt.feedback.mixInput(noise, pt.feedbackAmount * 1.1f);
+        const float filtered = pt.filter.process(mixedIn);
+        pt.feedback.processOutput(filtered);
+
+        if (std::fabs(filtered) > maxOut) maxOut = std::fabs(filtered);
+    }
+
+    CHECK(std::isfinite(maxOut));
+    // The per-point limiter in FeedbackEngine should keep things bounded
+    // Output might exceed 1.0 momentarily (before the output limiter), but should be finite
+    CHECK(maxOut < 100.0f); // Sanity: not blowing up to infinity
+}
+
+// ── PhaseVocoderShifter: finite output at all settings ────────────────────────
+
+#include "../src/PhaseVocoderShifter.hpp"
+
+TEST_CASE("PhaseVocoderShifter - pitch up produces finite output")
+{
+    Octofilter::PhaseVocoderShifter shifter;
+    shifter.prepare(44100.0, 512);
+    shifter.setShift(12.0f); // +1 octave
+
+    float in[512], out[512];
+    unsigned int rng = 77777;
+    for (int i = 0; i < 512; ++i)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        in[i] = (static_cast<float>(rng) / 4294967296.0f - 0.5f) * 0.5f;
+    }
+
+    // Process several blocks to warm up
+    for (int b = 0; b < 20; ++b)
+        shifter.process(in, out, 512);
+
+    for (int i = 0; i < 512; ++i)
+    {
+        CHECK(std::isfinite(out[i]));
+    }
+}
+
+TEST_CASE("PhaseVocoderShifter - pitch down produces finite output")
+{
+    Octofilter::PhaseVocoderShifter shifter;
+    shifter.prepare(44100.0, 512);
+    shifter.setShift(-12.0f); // -1 octave
+
+    float in[512], out[512];
+    unsigned int rng = 55555;
+    for (int i = 0; i < 512; ++i)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        in[i] = (static_cast<float>(rng) / 4294967296.0f - 0.5f) * 0.5f;
+    }
+
+    for (int b = 0; b < 20; ++b)
+        shifter.process(in, out, 512);
+
+    for (int i = 0; i < 512; ++i)
+    {
+        CHECK(std::isfinite(out[i]));
+    }
+}
+
+TEST_CASE("PhaseVocoderShifter - extreme pitch ±24st produces finite output")
+{
+    Octofilter::PhaseVocoderShifter shifter;
+    shifter.prepare(44100.0, 512);
+
+    float in[512], out[512];
+    unsigned int rng = 33333;
+    for (int i = 0; i < 512; ++i)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        in[i] = (static_cast<float>(rng) / 4294967296.0f - 0.5f) * 0.5f;
+    }
+
+    // Test +24
+    shifter.setShift(24.0f);
+    for (int b = 0; b < 20; ++b)
+        shifter.process(in, out, 512);
+    for (int i = 0; i < 512; ++i)
+        CHECK(std::isfinite(out[i]));
+
+    // Test -24
+    shifter.reset();
+    shifter.setShift(-24.0f);
+    for (int b = 0; b < 20; ++b)
+        shifter.process(in, out, 512);
+    for (int i = 0; i < 512; ++i)
+        CHECK(std::isfinite(out[i]));
+}
+
+// ── Single-point mode: DSP correctness ────────────────────────────────────────
+
+TEST_CASE("Single-point mode - 1 point produces finite stereo output")
+{
+    PointState pt;
+    pt.prepare(44100.0);
+    pt.filterType = BiQuadFilter::Type::LowPass;
+    pt.filter.setSampleRate(44100.0);
+    pt.filter.setType(BiQuadFilter::Type::LowPass);
+    pt.filter.setCutoff(1000.0f);
+    pt.filter.setQ(5.0f);
+    pt.setPitchShift(5.0f);
+    pt.feedbackAmount = 0.7f;
+    pt.level = 1.0f;
+    pt.pan = 0.0f; // centre
+
+    unsigned int rng = 11111;
+    for (int s = 0; s < 4096; ++s)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        float noise = (static_cast<float>(rng) / 4294967296.0f - 0.5f) * 0.5f;
+
+        const float mixedIn = pt.feedback.mixInput(noise, pt.feedbackAmount * 0.8f);
+        const float filtered = pt.filter.process(mixedIn);
+        pt.feedback.processOutput(filtered);
+
+        CHECK(std::isfinite(filtered));
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase 8 — Integration Tests (multi-sample-rate)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Integration - 10s render at 44100 Hz produces bounded output")
+{
+    constexpr double sr = 44100.0;
+    constexpr int totalSamples = static_cast<int>(sr * 10.0);
+    constexpr int numPoints = 8;
+
+    PointState points[numPoints];
+    DCBlocker dcL, dcR;
+    PeakLimiter limL, limR;
+    dcL.setSampleRate(sr); dcR.setSampleRate(sr);
+    limL.prepare(sr); limR.prepare(sr);
+
+    for (int i = 0; i < numPoints; ++i)
+    {
+        points[i].prepare(sr);
+        points[i].setPitchShift(static_cast<float>(i) - 4.0f);
+        points[i].feedbackAmount = 0.7f;
+        points[i].level = 1.0f;
+        points[i].pan = -1.0f + 2.0f * static_cast<float>(i) / 7.0f;
+        points[i].filter.setSampleRate(sr);
+        points[i].filter.setType(static_cast<BiQuadFilter::Type>(i % 4));
+        points[i].filter.setCutoff(200.0f + static_cast<float>(i) * 400.0f);
+        points[i].filter.setQ(5.0f);
+    }
+
+    unsigned int rng = 42;
+    float maxAbsOut = 0.0f;
+    bool allFinite = true;
+
+    for (int s = 0; s < totalSamples; ++s)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        float noise = (static_cast<float>(rng) / 4294967296.0f - 0.5f) * 0.3f;
+
+        float wetL = 0.0f, wetR = 0.0f;
+        for (int p = 0; p < numPoints; ++p)
+        {
+            PointState& pt = points[p];
+            const float mixedIn = pt.feedback.mixInput(noise, pt.feedbackAmount * 0.9f);
+            const float filtered = pt.filter.process(mixedIn);
+            pt.feedback.processOutput(filtered);
+            const float scaled = filtered * pt.level / static_cast<float>(numPoints);
+            const float panR = (pt.pan + 1.0f) * 0.5f;
+            wetL += scaled * (1.0f - panR);
+            wetR += scaled * panR;
+        }
+
+        float outL = limL.process(dcL.process(wetL));
+        float outR = limR.process(dcR.process(wetR));
+
+        if (!std::isfinite(outL) || !std::isfinite(outR)) allFinite = false;
+        if (std::fabs(outL) > maxAbsOut) maxAbsOut = std::fabs(outL);
+        if (std::fabs(outR) > maxAbsOut) maxAbsOut = std::fabs(outR);
+    }
+
+    CHECK(allFinite);
+    CHECK(maxAbsOut <= 1.01f); // limiter should keep below 1.0 (tiny overshoot OK)
+}
+
+TEST_CASE("Integration - 10s render at 48000 Hz produces bounded output")
+{
+    constexpr double sr = 48000.0;
+    constexpr int totalSamples = static_cast<int>(sr * 10.0);
+
+    PointState points[8];
+    DCBlocker dcL, dcR;
+    PeakLimiter limL, limR;
+    dcL.setSampleRate(sr); dcR.setSampleRate(sr);
+    limL.prepare(sr); limR.prepare(sr);
+
+    for (int i = 0; i < 8; ++i)
+    {
+        points[i].prepare(sr);
+        points[i].setPitchShift(static_cast<float>((i % 5) - 2) * 3.0f);
+        points[i].feedbackAmount = 0.8f;
+        points[i].level = 1.0f;
+        points[i].filter.setSampleRate(sr);
+        points[i].filter.setType(static_cast<BiQuadFilter::Type>(i % 4));
+        points[i].filter.setCutoff(300.0f + static_cast<float>(i) * 300.0f);
+        points[i].filter.setQ(7.0f);
+    }
+
+    unsigned int rng = 101;
+    bool allFinite = true;
+    float maxAbs = 0.0f;
+
+    for (int s = 0; s < totalSamples; ++s)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        float noise = (static_cast<float>(rng) / 4294967296.0f - 0.5f) * 0.3f;
+        float wetL = 0.0f, wetR = 0.0f;
+
+        for (int p = 0; p < 8; ++p)
+        {
+            const float mixedIn = points[p].feedback.mixInput(noise, points[p].feedbackAmount * 0.9f);
+            const float filtered = points[p].filter.process(mixedIn);
+            points[p].feedback.processOutput(filtered);
+            wetL += filtered / 8.0f;
+            wetR += filtered / 8.0f;
+        }
+
+        float outL = limL.process(dcL.process(wetL));
+        float outR = limR.process(dcR.process(wetR));
+        if (!std::isfinite(outL) || !std::isfinite(outR)) allFinite = false;
+        if (std::fabs(outL) > maxAbs) maxAbs = std::fabs(outL);
+        if (std::fabs(outR) > maxAbs) maxAbs = std::fabs(outR);
+    }
+
+    CHECK(allFinite);
+    CHECK(maxAbs <= 1.01f);
+}
+
+TEST_CASE("Integration - 10s render at 96000 Hz produces bounded output")
+{
+    constexpr double sr = 96000.0;
+    constexpr int totalSamples = static_cast<int>(sr * 10.0);
+
+    PointState points[8];
+    DCBlocker dcL, dcR;
+    PeakLimiter limL, limR;
+    dcL.setSampleRate(sr); dcR.setSampleRate(sr);
+    limL.prepare(sr); limR.prepare(sr);
+
+    for (int i = 0; i < 8; ++i)
+    {
+        points[i].prepare(sr);
+        points[i].setPitchShift(static_cast<float>(i) * 2.0f - 7.0f);
+        points[i].feedbackAmount = 0.9f;
+        points[i].level = 1.0f;
+        points[i].filter.setSampleRate(sr);
+        points[i].filter.setType(static_cast<BiQuadFilter::Type>(i % 4));
+        points[i].filter.setCutoff(500.0f + static_cast<float>(i) * 500.0f);
+        points[i].filter.setQ(10.0f);
+    }
+
+    unsigned int rng = 7777;
+    bool allFinite = true;
+    float maxAbs = 0.0f;
+
+    for (int s = 0; s < totalSamples; ++s)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        float noise = (static_cast<float>(rng) / 4294967296.0f - 0.5f) * 0.3f;
+        float wetL = 0.0f, wetR = 0.0f;
+
+        for (int p = 0; p < 8; ++p)
+        {
+            const float mixedIn = points[p].feedback.mixInput(noise, points[p].feedbackAmount * 1.0f);
+            const float filtered = points[p].filter.process(mixedIn);
+            points[p].feedback.processOutput(filtered);
+            wetL += filtered / 8.0f;
+            wetR += filtered / 8.0f;
+        }
+
+        float outL = limL.process(dcL.process(wetL));
+        float outR = limR.process(dcR.process(wetR));
+        if (!std::isfinite(outL) || !std::isfinite(outR)) allFinite = false;
+        if (std::fabs(outL) > maxAbs) maxAbs = std::fabs(outL);
+        if (std::fabs(outR) > maxAbs) maxAbs = std::fabs(outR);
+    }
+
+    CHECK(allFinite);
+    CHECK(maxAbs <= 1.01f);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase 8 — Crash Testing (extreme parameters)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Crash test - all params at extreme values simultaneously")
+{
+    PointState points[8];
+    DCBlocker dcL, dcR;
+    PeakLimiter limL, limR;
+    dcL.setSampleRate(44100.0); dcR.setSampleRate(44100.0);
+    limL.prepare(44100.0); limR.prepare(44100.0);
+
+    for (int i = 0; i < 8; ++i)
+    {
+        points[i].prepare(44100.0);
+        points[i].setPitchShift(24.0f);   // max pitch
+        points[i].feedbackAmount = 1.1f;  // max feedback
+        points[i].level = 2.0f;           // max level
+        points[i].filter.setSampleRate(44100.0);
+        points[i].filter.setType(BiQuadFilter::Type::BandPass);
+        points[i].filter.setCutoff(20000.0f); // max cutoff
+        points[i].filter.setQ(20.0f);         // max Q
+    }
+
+    unsigned int rng = 666;
+    bool crashed = false;
+
+    for (int s = 0; s < 44100; ++s) // 1 second
+    {
+        rng = rng * 1664525u + 1013904223u;
+        float noise = (static_cast<float>(rng) / 4294967296.0f - 0.5f);
+
+        float wetL = 0.0f, wetR = 0.0f;
+        for (int p = 0; p < 8; ++p)
+        {
+            const float mixedIn = points[p].feedback.mixInput(noise, points[p].feedbackAmount * 1.1f);
+            const float filtered = points[p].filter.process(mixedIn);
+            points[p].feedback.processOutput(filtered);
+            wetL += filtered / 8.0f;
+            wetR += filtered / 8.0f;
+        }
+
+        float outL = limL.process(dcL.process(wetL));
+        float outR = limR.process(dcR.process(wetR));
+
+        if (!std::isfinite(outL) || !std::isfinite(outR))
+        {
+            crashed = true;
+            break;
+        }
+    }
+
+    CHECK_FALSE(crashed);
+}
+
+TEST_CASE("Crash test - rapid pitch shift changes")
+{
+    PointState pt;
+    pt.prepare(44100.0);
+    pt.feedbackAmount = 0.9f;
+    pt.level = 1.0f;
+    pt.filter.setSampleRate(44100.0);
+    pt.filter.setType(BiQuadFilter::Type::LowPass);
+    pt.filter.setCutoff(2000.0f);
+    pt.filter.setQ(10.0f);
+
+    unsigned int rng = 12321;
+    bool allFinite = true;
+
+    for (int s = 0; s < 44100; ++s)
+    {
+        // Change pitch every 32 samples (extremely rapid)
+        if (s % 32 == 0)
+        {
+            float newPitch = (static_cast<float>(s % 48) - 24.0f);
+            pt.setPitchShift(newPitch);
+        }
+
+        rng = rng * 1664525u + 1013904223u;
+        float noise = (static_cast<float>(rng) / 4294967296.0f - 0.5f) * 0.3f;
+
+        const float mixedIn = pt.feedback.mixInput(noise, pt.feedbackAmount * 0.9f);
+        const float filtered = pt.filter.process(mixedIn);
+        pt.feedback.processOutput(filtered);
+
+        if (!std::isfinite(filtered)) { allFinite = false; break; }
+    }
+
+    CHECK(allFinite);
+}
+
+TEST_CASE("Crash test - rapid filter cutoff changes")
+{
+    PointState pt;
+    pt.prepare(44100.0);
+    pt.feedbackAmount = 0.8f;
+    pt.level = 1.0f;
+    pt.filter.setSampleRate(44100.0);
+    pt.filter.setType(BiQuadFilter::Type::HighPass);
+    pt.filter.setQ(15.0f);
+    pt.setPitchShift(7.0f);
+
+    unsigned int rng = 54321;
+    bool allFinite = true;
+
+    for (int s = 0; s < 44100; ++s)
+    {
+        // Sweep cutoff rapidly every sample
+        float cutoff = 20.0f + static_cast<float>(s % 1000) * 20.0f; // 20-20000 Hz sweep
+        pt.filter.setCutoff(cutoff);
+
+        rng = rng * 1664525u + 1013904223u;
+        float noise = (static_cast<float>(rng) / 4294967296.0f - 0.5f) * 0.3f;
+
+        const float mixedIn = pt.feedback.mixInput(noise, pt.feedbackAmount * 1.0f);
+        const float filtered = pt.filter.process(mixedIn);
+        pt.feedback.processOutput(filtered);
+
+        if (!std::isfinite(filtered)) { allFinite = false; break; }
+    }
+
+    CHECK(allFinite);
+}
+
+TEST_CASE("Crash test - zero-length and minimum cutoff")
+{
+    BiQuadFilter f;
+    f.setSampleRate(44100.0);
+    f.setType(BiQuadFilter::Type::LowPass);
+    f.setCutoff(20.0f); // minimum
+    f.setQ(20.0f);      // maximum
+
+    float out = 0.0f;
+    for (int i = 0; i < 1000; ++i)
+        out = f.process(1.0f); // constant DC input
+
+    CHECK(std::isfinite(out));
 }

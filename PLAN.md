@@ -174,8 +174,7 @@ inactive. Ableton does not always hide these cleanly — test with 2-point and 8
 ## Phase 5 — Harmonic Mode
 
 **Goal:** An optional mode where filter cutoffs are tuned to the natural harmonic series of the
-Texture frequency, with independent per-point glide to each new target. Spread controls the
-harmonic range. Random mode remains available as a toggle.
+Texture frequency. Spread controls the harmonic range. Random mode remains available as a toggle.
 
 ### Concept
 
@@ -193,11 +192,6 @@ Where `spreadFactor` is derived from the Spread knob: at Spread=1 all N points s
 1 through N; at Spread=0.5 they cluster in the lower harmonics (1 through N/2); at Spread=0
 all points sit at the fundamental.
 
-**Glide:** When Texture changes in Harmonic mode, each point's filter cutoff doesn't jump
-instantly — it glides independently to its new target using a one-pole IIR smoother with a
-user-controlled glide time. Since higher harmonics are larger intervals, faster-moving harmonics
-will reach their target at different times, creating an organic cascading sweep effect.
-
 ### Tasks
 - [ ] Add `HarmonicMode` enum to `PointState`: `kRandom`, `kHarmonic`
 - [ ] Implement `HarmonicMapper` class:
@@ -205,14 +199,8 @@ will reach their target at different times, creating an organic cascading sweep 
     to its harmonic of the current Texture frequency
   - Uses natural harmonic series: `targetHz = textureHz * harmonicNumber`
   - Harmonic numbers derived from spread: `harmonicNumber[i] = 1 + round(i * spread * (N-1))`
-- [ ] Implement per-point cutoff glide using one-pole IIR smoother:
-  - `currentCutoff` tracks actual filter cutoff (smoothed)
-  - `targetCutoff` is the harmonic target (set instantly on Texture change)
-  - Glide coefficient computed from `GlideTime` parameter (10ms–2000ms)
-  - Each point updates independently each block: `current += coeff * (target - current)`
-- [ ] Add parameters:
+- [ ] Add parameter:
   - `HarmonicMode` — toggle (0=Random, 1=Harmonic)
-  - `GlideTime` — 10ms to 2000ms (logarithmic), only active in Harmonic mode
 - [ ] Update `Randomise` behaviour:
   - In **Random mode**: randomises all per-point cutoff offsets, filter types, pan overrides,
     pitch shifts, feedback amounts — everything except buttons and mode toggles
@@ -220,17 +208,12 @@ will reach their target at different times, creating an organic cascading sweep 
     but NOT cutoff offsets (those are set by harmonics)
 - [ ] Update `OctofilterPlugin::updateFilterParams()` to branch on mode:
   - Random: existing behaviour (Texture + random semitone offset)
-  - Harmonic: use HarmonicMapper targets, advanced by per-point glide smoother each block
+  - Harmonic: use HarmonicMapper targets applied directly (instant)
 - [ ] Unit tests:
   - HarmonicMapper assigns correct harmonic numbers at various spread values
-  - Glide smoother reaches target within expected time (±10%)
-  - Mode switch doesn't cause clicks (glide smooths the transition)
+  - Mode switch doesn't cause clicks
 
 **Dependencies:** Phase 4 (per-point parameter set must exist).
-
-**Risk:** Glide smoothing runs on the audio thread — coefficient must be pre-computed in
-`setParameterValue`, not recalculated per sample. Watch for zipper noise on Texture automation
-in Harmonic mode; the glide smoother should absorb this naturally.
 
 ---
 
@@ -289,34 +272,15 @@ or destroy it manually.
 
 #### Randomise Variations
 - [ ] **Randomise All** — replaces current "RANDOM" button in top bar. Randomises ALL parameters
-  including globals (Texture, Feedback, Pitch, Resonance, Glide) plus all per-point params.
+  including globals (Texture, Feedback, Pitch, Resonance) plus all per-point params.
 - [ ] **Per-point Randomise** — small button in the per-point panel (right side). Randomises only
   the currently selected point's params (filter type, cutoff offset, Q, pan, level, FB, pitch).
 - [ ] **Global Randomise** — small button in the global strip (bottom). Randomises only global
-  params (Texture, Resonance, Feedback, Pitch, Wet/Dry, Glide).
-
-#### Multi-Select Points
-- [ ] Ctrl+click on points to add/remove from selection (toggle behaviour)
-- [ ] Dragging with multiple points selected moves all selected points together (X=pan, Y=cutoff)
-- [ ] Per-point panel shows the first selected point's params (last clicked = "primary" selection)
-- [ ] Visual: all selected points get the highlight ring, primary gets a thicker/brighter ring
-- [ ] Clicking empty space or clicking without Ctrl deselects all
-
-#### Waveform Display
-- [ ] Add a ring buffer in the DSP (size ~2048 samples) that stores recent output L+R mixed
-- [ ] UI reads from this buffer each frame and draws an oscilloscope-style waveform
-- [ ] Positioned bottom-right of the stereo field as a small inset box (~120×60 px)
-- [ ] Styled: dark inset background, waveform drawn in accent colour (purple or gold)
-- [ ] Non-interactive (display only)
-
-#### Bug Fix
-- [ ] **Wet/Dry glide bug** — Wet/Dry parameter is incorrectly affected by the cutoff glide
-  system. Fix: wet/dry should always be applied directly (instant), never glided. Ensure the
-  raw `mWetDry` value is used in run() without any smoothing or glide interaction.
+  params (Texture, Resonance, Feedback, Pitch, Wet/Dry).
 
 **Dependencies:** Phase 6 (core UI complete).
 
-**Effort estimate:** ~1.5 days total (randomise variations: 1hr, multi-select: 4hr, waveform: 4hr, bug fix: 15min).
+**Effort estimate:** ~1 hour total (randomise variations: 1hr, bug fix: 15min).
 
 ---
 
@@ -365,22 +329,26 @@ or destroy it manually.
 
 ## Phase 7 — Integration & Polish
 
-**Goal:** Plugin sounds good, performs within CPU budget, ships clean.
+**Goal:** Plugin performs within CPU budget, sounds clean under automation, builds on all platforms.
 
 ### Tasks
-- [ ] Implement global wet/dry mix (dry = original stereo input, wet = filter bank output)
+- [x] ~~Implement global wet/dry mix~~ (done in Phase 2)
+- [x] ~~macOS universal binary~~ (confirmed in CI: arm64 + x86_64)
 - [ ] Profile CPU usage at 44.1kHz/512 samples, 8 points, all feedback + pitch shift active.
-  Target: <5% single core. Optimise filter inner loop with SIMD if needed (std::valarray or
-  manual SSE/NEON); pffft already uses SIMD for FFT
-- [ ] Parameter smoothing audit: confirm no zipper noise on Texture, Spread, Feedback sweeps
+  Target: <5% single core. Optimise filter inner loop with SIMD if needed.
+- [ ] Parameter smoothing audit: check for zipper noise on Texture, Feedback, Pitch automation.
+  Currently all globals are direct (no smoothing) — add per-sample interpolation if needed.
 - [ ] Graceful point count change: when user reduces point count mid-playback, mute removed points
-  over ~10 ms to avoid clicks
-- [ ] macOS universal binary: confirm both arm64 and x86_64 slices present in plugin (`lipo -info` in CI)
-- [ ] AU validation: run `auval -v aufx Octo Henr` and fix any reported issues
+  over ~10 ms crossfade to avoid clicks.
+- [ ] Update DPF submodule to latest (fixes Windows CI OpenGL header issue).
+- [ ] Re-enable Windows CI build after DPF update.
+- [ ] AU validation: run `auval -v aufx Octo Hnry` on macOS and fix any reported issues.
 - [ ] Ableton Live 12 validation: load, automate all parameters, save/load project, confirm state
-  restores correctly
+  restores correctly. Test on both Windows and macOS.
+- [ ] Test single-point mode (1 point) works correctly in all DAWs.
+- [ ] Verify Q ceiling doesn't over-limit in normal use cases (musical Q values).
 
-**Dependencies:** Phases 1–5.
+**Dependencies:** Phase 6d complete.
 
 ---
 
@@ -389,21 +357,26 @@ or destroy it manually.
 **Goal:** Confidence in correctness, stability, and performance before release.
 
 ### Tasks
-- [ ] **Unit tests** (catch2 or doctest, added to CI):
-  - BiQuadFilter: frequency response at cutoff ±3 dB
-  - InputRouter: all point counts 2–8, mono and stereo
-  - TextureMapper: output in valid Hz range, monotonically increasing
-  - PeakLimiter: output never exceeds ceiling under impulse input
-  - Feedback stability: 1000-sample run at feedback=95%, assert no NaN/Inf
-- [ ] **Integration tests**: render 10 seconds of white noise through plugin at each sample rate,
-  assert output is finite and within [-1, 1] (with safety limiter active)
-- [ ] **Performance regression**: add CI step that builds in Release, runs the render test, and
-  fails if wall-clock time exceeds threshold
-- [ ] **Manual DAW testing checklist**: automation recording, preset save/load, plugin scan, bypass,
-  mono track, stereo track, sidechain track (verify sidechain is correctly unavailable)
-- [ ] **AU notarisation** (macOS): set up `xcrun notarytool` in CI for signed builds
+- [x] ~~Unit tests for BiQuadFilter, InputRouter, TextureMapper, PeakLimiter, Feedback stability~~
+  (done in Phases 1–3, all passing)
+- [ ] **Expand unit tests**:
+  - HarmonicMapper: harmonic assignment at all spread values
+  - Q ceiling: verify output stays below 0dBFS at high feedback+pitch+Q
+  - PhaseVocoderShifter: pitch up/down produces finite output at all settings
+  - Single-point mode: DSP works with pointCount=1
+- [ ] **Integration tests**: render 10 seconds of white noise through plugin at each sample rate
+  (44.1, 48, 88.2, 96 kHz), assert output is finite and within [-1, 1]
+- [ ] **Performance regression**: CI step that builds Release, runs render test, fails if
+  wall-clock time exceeds threshold (< 200ms for 10s of audio at 44.1kHz)
+- [ ] **Manual DAW testing checklist**:
+  - Ableton Live 12 (Windows + macOS): automation, preset save/load, plugin scan, bypass
+  - Logic Pro (macOS): AU format, automation, save/load
+  - REAPER (Windows): VST3 + CLAP, parameter display, automation
+  - Test on mono track, stereo track
+- [ ] **AU notarisation** (macOS): set up Apple Developer account, `xcrun notarytool` in CI
+- [ ] **Crash testing**: rapid parameter changes, fast point count toggling, extreme values
 
-**Dependencies:** Phases 0–6.
+**Dependencies:** Phase 7 complete.
 
 ---
 
@@ -438,7 +411,7 @@ or destroy it manually.
 | Pitch shifter quality in feedback | Replaced phase vocoder with simpler tape-style dual-head (better for feedback) | ✅ Resolved |
 | Per-point feedback instability | One-sample delay + PeakLimiter + DCBlocker on every loop | ✅ Resolved |
 | Output DC / ear fatigue | Output DC blockers + output safety limiter (0 dBFS ceiling) | ✅ Resolved |
-| DPF fixed parameter count | 69 params declared; unused hidden with `kParameterIsHidden` | ✅ Resolved |
+| DPF fixed parameter count | 68 params declared; unused hidden with `kParameterIsHidden` | ✅ Resolved |
 | Ableton doesn't show params | `Options.txt` with `-_PluginAutoPopulateThreshold=128` | ✅ Resolved |
 | DPF can't notify host of param changes | Randomise works sonically; visual update needs GUI (Phase 6) | Known limitation |
 | `setState()` thread safety | Double-buffer pending state, swap atomically at block start | ✅ Implemented |
@@ -456,58 +429,49 @@ or destroy it manually.
 | 1 | DSP core: filters, routing, panning | ✅ Complete |
 | 2 | Stable feedback loops with limiting | ✅ Complete |
 | 3 | Pitch shift in feedback path | ✅ Complete (tape-style dual-head) |
-| 4 | Full parameter set, state save/restore | ✅ Complete (69 params, 59 visible) |
-| 5 | Harmonic mode with per-point glide | ✅ Complete |
+| 4 | Full parameter set, state save/restore | ✅ Complete (68 params, 58 visible) |
+| 5 | Harmonic mode | ✅ Complete |
 | 6 | Complete UI | 🔶 In progress (core layout done, iterating) |
 | 6c | UI iteration from user feedback | ✅ Complete |
-| 6d | User testing feedback fixes | 🔲 Next |
-| 7 | Integration, CPU budget, AU/DAW validation | 🔲 |
+| 6d | User testing feedback fixes | ✅ Complete |
+| 7 | Integration, CPU budget, AU/DAW validation | 🔲 Next |
 | 8 | Test suite, QA, release | 🔲 |
-| 9 | Presets, menu, distribution | 🔲 |
+| 9 | Presets, menu, distribution | ✅ Complete |
 
-## Current State (2026-07-24)
+## Current State (2026-08-14)
 
-Working VST3 plugin with custom NanoVG GUI, deployable to Ableton Live 12 (Windows).
+Working VST3/CLAP plugin with custom NanoVG GUI, deployable to Ableton Live 12 (Windows).
+macOS universal binary (arm64 + x86_64) built via GitHub Actions CI.
 
 ### What's complete:
-- **Phases 0–5**: DSP core, feedback, pitch shift, full parameter set, harmonic mode
-- **Phase 6 (in progress)**: GUI functional and iterating. Core layout working:
-  - Stereo field canvas with draggable point nodes (X=pan, Y=cutoff offset from centre)
-  - Point nodes: colour=filter type, size=global×per-point feedback, ring=pitch shift
-  - Per-point panel on right side (FILTER: Type/Q/Cutoff, SPATIAL: Pan/FB, MOD: Level/Pitch)
-  - Global controls strip at bottom, grouped: FILTER | EFFECT | OUTPUT
-  - Point count ±buttons in top-right
-  - Bipolar knobs for signed params, unipolar for 0-max params
-  - Cutoff knob shows magnitude with zone memory (top/bottom half remembered)
-  - Scroll wheel on points controls feedback (size)
-  - Blodyn Tatws colour palette applied throughout
+- **Phases 0–6d**: DSP core, feedback, pitch shift, full parameter set, harmonic mode, complete UI with all user feedback addressed
+- **Phase 7 (in progress)**: Integration & polish
+  - ✅ CPU benchmark test added (8 points worst-case)
+  - ✅ Parameter smoothing: Texture, Feedback, Pitch, WetDry, Gains all smoothed per-block
+  - ✅ Graceful point count changes (10ms fade in/out)
+  - ✅ Q ceiling verified safe for musical use (2.5–10 never limited)
+  - ✅ Single-point mode verified correct
+  - 🔲 Ableton Live 12 validation (manual testing needed)
 
-### Remaining Phase 6 tasks:
-- Randomise button in GUI
-- Harmonic Mode toggle in GUI
-- Visual polish (consistent spacing, resizing behaviour)
-- Double-click to reset knob to default
-
-### Known issues / next steps:
-- Texture controls cutoff spread (working) but glide time needs user testing
-- Randomise doesn't visually update knob positions (DPF limitation without UI→host notification)
-- Per-point params (Type, Q, Cutoff, Pan, Level, FB, Pitch) all interactive via knobs
-- Global feedback directly scales per-point feedback for consistent mental model
-- Phase 7 (Integration/Polish) and Phase 8 (Testing/QA) remain after Phase 6
+### Architecture:
+- 13 global params + 7 per-point × 8 points = **69 parameters**
+- Texture = centre frequency (log 20Hz–20kHz), per-point offsets spread ±24st above/below
+- Stereo Width = independent pan collapse control (0=mono, 1=full)
+- Feedback: exponential knob curve (pow 0.6) so midpoint ≈ 66% — easier to reach the sweet spot
+- Q range: 2.5–20 (always resonant)
+- Headroom: 1.1× (just above unity for self-oscillation)
+- Randomise ranges: feedback 0.4–0.9, pitch ±7st (always musically interesting)
 
 ### Build setup:
 - Source: `C:\Users\Henry\Dropbox\Plugin_ideas\Octofilter` (Dropbox, single source of truth)
-- Linux build: `~/dev/Octofilter-build` (Ninja, from Dropbox source)
-- Windows build: `build-windows/` folder in Dropbox (MSVC Visual Studio 17 2022)
+- Windows build: `build-windows/` folder (MSVC Visual Studio 17 2022)
 - Deploy: copy VST3 bundle to `C:\Program Files (x86)\Common Files\VST3\`
 - Ableton requires `Options.txt` with `-_PluginAutoPopulateThreshold=128` in latest Live 12.x.x prefs folder
 - Close Ableton before deploying new builds (locks the DLL)
 
-### Key technical decisions made during this phase:
-- Removed parameter smoothers (were too slow at block-rate, caused wet/dry and texture to not respond)
-- Glide system handles cutoff smoothing; all other params are direct/instant
-- Point Y-axis = cutoff offset (±24st from centre line), not pitch shift
-- Cutoff knob shows magnitude (0–24) with stored zone memory for sign direction
-- Global feedback = `mFeedback × 1.3` applied directly; per-point feedback scales on top
-- Global pitch shift = additive offset on all points
-- Texture = single "openness" knob collapsing cutoffs + pans toward zero/centre
+### Key technical decisions:
+- Texture and pan are fully decoupled (Texture=vertical/frequency, Width=horizontal/stereo)
+- Glide system removed — all cutoff changes are instant (smoothed at block-rate by ParamSmoother)
+- Feedback knob uses exponential curve for more time in the expressive high-feedback zone
+- Per-point fade system for click-free point count changes
+- Pitch shift lives inside feedback loop only (creates spirals, not dry pitch shift)

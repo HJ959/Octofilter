@@ -15,7 +15,7 @@ Octofilter splits your audio into 1–8 independent filter "points", each with i
 - **1–8 filter points** — LP, HP, BP, Notch per point
 - **Per-point feedback with pitch shifting** — creates evolving pitched spirals
 - **Texture knob** — single performance control that opens/closes the entire effect
-- **Harmonic mode** — locks filter cutoffs to natural harmonic series with independent glide
+- **Harmonic mode** — locks filter cutoffs to natural harmonic series
 - **Stereo field visualiser** — interactive GUI showing point positions (X=pan, Y=cutoff)
 - **Randomise** — scatter parameters for instant sound design inspiration
 - **Safety limiters** — per-point and output DC blocking + peak limiting protects your ears
@@ -114,7 +114,6 @@ src/
 ├── FeedbackEngine.hpp        — Per-point feedback loop (DC block + limiter + pitch)
 ├── PointState.hpp            — Per-point state container
 ├── HarmonicMapper.hpp        — Natural harmonic series assignment
-├── CutoffGlide.hpp           — Per-point one-pole IIR cutoff smoother
 ├── TextureMapper.hpp         — Log frequency mapping
 ├── InputRouter.hpp           — Mono/stereo channel assignment
 ├── StereoMixer.hpp           — Equal-power pan law

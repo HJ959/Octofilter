@@ -2,7 +2,6 @@
 
 #include "DistrhoPlugin.hpp"
 #include "BiQuadFilter.hpp"
-#include "CutoffGlide.hpp"
 #include "HarmonicMapper.hpp"
 #include "InputRouter.hpp"
 #include "ParamSmoother.hpp"
@@ -77,6 +76,8 @@ private:
     Octofilter::PeakLimiter mOutputLimiterL; // safety limiter, left
     Octofilter::PeakLimiter mOutputLimiterR; // safety limiter, right
     int    mActivePoints { 2 };
+    int    mTargetPoints { 2 };  // desired point count (fades toward this)
+    float  mPointFade[8] { 1,1,1,1,1,1,1,1 }; // per-point fade multiplier (0=silent, 1=full)
     double mSampleRate   { 44100.0 };
 
     // Waveform display ring buffer (written by DSP, read by UI)
@@ -121,17 +122,29 @@ private:
 
     // ── Harmonic mode ─────────────────────────────────────────────────────
     float mHarmonicMode  { 0.0f };  // 0=Random, 1=Harmonic
-    float mGlideTimeMs   { 200.0f };  // 10–2000 ms
-    Octofilter::CutoffGlide mGlide[8]; // per-point cutoff glide
+    float mStereoCollapse { 1.0f }; // 0=mono, 1=full width
 
     // Double-buffer for thread-safe setState from host thread
     struct PendingState
     {
+        // Per-point
         float cutoffOffsets[8] {};
         float filterTypes[8]   {};
         float pitchShifts[8]   {};
         float feedbackAmts[8]  {};
+        float q[8]             {};
+        float pan[8]           {};
+        float level[8]         {};
+        // Globals
+        float texture          { 0.5f };
+        float feedback         { 0.3f };
+        float pitchShift       { 0.0f };
+        float wetDry           { 1.0f };
+        float stereoWidth      { 1.0f };
+        float harmonicMode     { 0.0f };
+        int   pointCount       { 2 };
         uint64_t rngSeed       { 12345 };
+        bool  hasGlobals       { false }; // true if globals are present in the state
         bool  valid            { false };
     };
     PendingState              mPendingState;

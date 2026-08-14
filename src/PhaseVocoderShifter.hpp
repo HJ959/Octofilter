@@ -103,10 +103,12 @@ public:
 private:
     float interpolate(float pos) const noexcept
     {
-        // Linear interpolation from circular buffer
-        const int   idx0  = static_cast<int>(pos) & kBufMask;
+        // Linear interpolation from circular buffer — handle negative pos
+        float p = pos;
+        while (p < 0.0f) p += static_cast<float>(kBufSize);
+        const int   idx0  = static_cast<int>(p) & kBufMask;
         const int   idx1  = (idx0 + 1) & kBufMask;
-        const float frac  = pos - std::floor(pos);
+        const float frac  = p - std::floor(p);
         return mBuf[idx0] + frac * (mBuf[idx1] - mBuf[idx0]);
     }
 

@@ -58,8 +58,6 @@ public:
         mLimiter.reset();
         if (mShifter) mShifter->reset();
         mFeedbackSample = 0.0f;
-        // Clear the single-sample pitch output
-        mShiftedSample  = 0.0f;
     }
 
     /**
@@ -112,7 +110,6 @@ private:
     PeakLimiter  mLimiter;
     IPitchShifter* mShifter { nullptr };
     float        mFeedbackSample { 0.0f };
-    float        mShiftedSample  { 0.0f };
 };
 
 } // namespace Octofilter

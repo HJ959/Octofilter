@@ -3,6 +3,16 @@
 #include "BgImage.hpp"
 #include <cstdio>
 #include <cmath>
+#include <cstring>
+#include <cstdlib>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <direct.h>
+#else
+#include <dirent.h>
+#include <sys/stat.h>
+#endif
 
 START_NAMESPACE_DISTRHO
 
@@ -51,7 +61,7 @@ enum GlobalParams : uint32_t
     kGlobalWetDry       = 9,
     kGlobalRandomise    = 10,
     kGlobalHarmonicMode = 11,
-    kGlobalGlideTime    = 12,
+    kGlobalStereoCollapse = 12,
 };
 
 static constexpr int kNumGlobalParams   = 13;
@@ -132,15 +142,15 @@ protected:
     void parameterChanged(uint32_t index, float value) override
     {
         if (index == kGlobalPointCount)    { fPointCount = static_cast<int>(value + 0.5f); repaint(); return; }
-        if (index == kGlobalTexture)       { fTexture = value; updateGlobalKnob(0, value); repaint(); return; }
-        if (index == kGlobalResonance)     { fResonance = value; updateGlobalKnob(1, value); repaint(); return; }
-        if (index == kGlobalFeedback)      { fFeedback = value; updateGlobalKnob(2, value); repaint(); return; }
-        if (index == kGlobalPitchShift)    { fPitchShift = value; updateGlobalKnob(3, value); repaint(); return; }
-        if (index == kGlobalWetDry)        { fWetDry = value; updateGlobalKnob(4, value); repaint(); return; }
-        if (index == kGlobalInputGain)     { fInputGain = value; updateGlobalKnob(5, value); repaint(); return; }
-        if (index == kGlobalOutputGain)    { fOutputGain = value; updateGlobalKnob(6, value); repaint(); return; }
-        if (index == kGlobalGlideTime)     { fGlideTime = value; updateGlobalKnob(7, value); repaint(); return; }
+        if (index == kGlobalTexture)       { fTexture = value; updateGlobalKnob(0, value); clampPointsToTexture(); repaint(); return; }
+        if (index == kGlobalResonance)     { fResonance = value; repaint(); return; }
+        if (index == kGlobalFeedback)      { fFeedback = value; updateGlobalKnob(1, value); repaint(); return; }
+        if (index == kGlobalPitchShift)    { fPitchShift = value; updateGlobalKnob(2, value); repaint(); return; }
+        if (index == kGlobalWetDry)        { fWetDry = value; updateGlobalKnob(3, value); repaint(); return; }
+        if (index == kGlobalInputGain)     { fInputGain = value; updateGlobalKnob(4, value); repaint(); return; }
+        if (index == kGlobalOutputGain)    { fOutputGain = value; updateGlobalKnob(5, value); repaint(); return; }
         if (index == kGlobalHarmonicMode)  { fHarmonicMode = value; repaint(); return; }
+        if (index == kGlobalStereoCollapse){ fStereoCollapse = value; updateGlobalKnob(6, value); repaint(); return; }
 
         if (index >= static_cast<uint32_t>(kNumGlobalParams))
         {
@@ -204,12 +214,17 @@ protected:
 
         drawTopBar(w, topBarH);
         drawStereoField(fieldX, fieldY, fieldW, fieldH);
-        drawWaveform(fieldX + fieldW - 130.0f, fieldY + fieldH - 70.0f, 120.0f, 60.0f);
         drawPerPointPanel(ppX, ppY, ppW, ppH);
         drawGlobalStrip(globalX, globalY, globalW, globalH);
+
+        // Menu overlay (drawn on top of everything)
+        if (fMenuOpen)
+            drawMenuOverlay(w, h);
+        if (fPresetsOpen)
+            drawPresetsOverlay(w, h);
     }
 
-    // ── Top bar (title + point count + Randomise + Harmonic) ────────────
+    // ── Top bar (title + RND ALL + HARMONIC + [◄] Preset [►] + MENU) ────
     void drawTopBar(float w, float h)
     {
         fontSize(15.0f);
@@ -218,10 +233,10 @@ protected:
         textAlign(ALIGN_LEFT | ALIGN_MIDDLE);
         text(12.0f, h * 0.5f, "OCTOFILTER", nullptr);
 
-        const float btnH = 18.0f;
+        const float btnH = 20.0f;
         const float btnY = h * 0.5f - btnH * 0.5f;
 
-        // ── Randomise All button (after title) ────────────────────────────
+        // ── Randomise All button ──────────────────────────────────────────
         const float rndX = 120.0f;
         const float rndW = 75.0f;
         fRandomiseBtnX = rndX;
@@ -233,7 +248,6 @@ protected:
         roundedRect(rndX, btnY, rndW, btnH, 3.0f);
         fillColor(Palette::highlight);
         fill();
-        // Bright outline for prominence
         strokeColor(Palette::text);
         strokeWidth(1.0f);
         stroke();
@@ -260,41 +274,101 @@ protected:
         textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
         text(harmX + harmW * 0.5f, btnY + btnH * 0.5f, "HARMONIC", nullptr);
 
-        // ── Point count selector: [-] N [+] (far right) ──────────────────
-        const float pcBtnSize = 18.0f;
-        const float rightX = w - 12.0f;
-        fPtCountPlusX   = rightX - pcBtnSize;
-        fPtCountMinusX  = fPtCountPlusX - pcBtnSize * 2.5f;
-        fPtCountBtnY    = btnY;
-        fPtCountBtnSize = pcBtnSize;
+        // ── Point count: [-] N [+] ───────────────────────────────────────
+        const float pcX = harmX + harmW + 12.0f;
+        const float pcBtnSz = 18.0f;
+        fPtCountMinusX = pcX;
+        fPtCountBtnY   = btnY + 1.0f;
+        fPtCountBtnSize = pcBtnSz;
 
-        // [-] button
         beginPath();
-        roundedRect(fPtCountMinusX, fPtCountBtnY, pcBtnSize, pcBtnSize, 3.0f);
+        roundedRect(pcX, fPtCountBtnY, pcBtnSz, pcBtnSz, 3.0f);
         fillColor(Palette::outline);
         fill();
-        fontSize(14.0f);
+        fontSize(13.0f);
         fillColor(Palette::text);
         textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
-        text(fPtCountMinusX + pcBtnSize * 0.5f, fPtCountBtnY + pcBtnSize * 0.5f, "-", nullptr);
+        text(pcX + pcBtnSz * 0.5f, fPtCountBtnY + pcBtnSz * 0.5f, "-", nullptr);
 
-        // Count display
         char pcBuf[8];
         std::snprintf(pcBuf, sizeof(pcBuf), "%d", fPointCount);
-        fontSize(14.0f);
+        fontSize(13.0f);
         fillColor(Palette::highlight);
         textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
-        text(fPtCountMinusX + pcBtnSize * 1.75f, fPtCountBtnY + pcBtnSize * 0.5f, pcBuf, nullptr);
+        text(pcX + pcBtnSz + 10.0f, fPtCountBtnY + pcBtnSz * 0.5f, pcBuf, nullptr);
 
-        // [+] button
+        fPtCountPlusX = pcX + pcBtnSz + 20.0f;
         beginPath();
-        roundedRect(fPtCountPlusX, fPtCountBtnY, pcBtnSize, pcBtnSize, 3.0f);
+        roundedRect(fPtCountPlusX, fPtCountBtnY, pcBtnSz, pcBtnSz, 3.0f);
         fillColor(Palette::outline);
         fill();
-        fontSize(14.0f);
+        fontSize(13.0f);
         fillColor(Palette::text);
         textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
-        text(fPtCountPlusX + pcBtnSize * 0.5f, fPtCountBtnY + pcBtnSize * 0.5f, "+", nullptr);
+        text(fPtCountPlusX + pcBtnSz * 0.5f, fPtCountBtnY + pcBtnSz * 0.5f, "+", nullptr);
+
+        // ── MENU button (far right) ──────────────────────────────────────
+        const float rightEdge = w - 12.0f;
+        const float menuW = 52.0f;
+        const float menuX = rightEdge - menuW;
+        fMenuBtnX = menuX;
+        fMenuBtnY = btnY;
+        fMenuBtnW = menuW;
+        fMenuBtnH = btnH;
+
+        beginPath();
+        roundedRect(menuX, btnY, menuW, btnH, 3.0f);
+        fillColor(fMenuOpen ? Palette::accent : Palette::outline);
+        fill();
+        fontSize(11.0f);
+        fillColor(Palette::text);
+        textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
+        text(menuX + menuW * 0.5f, btnY + btnH * 0.5f, "MENU", nullptr);
+
+        // ── Preset strip: [◄] Name [►] ──────────────────────────────────
+        const float presetStripX = menuX - 190.0f;
+        const float arrowW = 20.0f;
+        const float nameW = 146.0f;
+        const float stripW = arrowW + nameW + arrowW;
+
+        fPresetStripX = presetStripX;
+        fPresetStripY = btnY;
+        fPresetStripW = stripW;
+        fPresetStripH = btnH;
+        fPresetArrowW = arrowW;
+        fPresetNameW  = nameW;
+
+        // Left arrow [◄]
+        beginPath();
+        roundedRect(presetStripX, btnY, arrowW, btnH, 3.0f);
+        fillColor(Palette::outline);
+        fill();
+        fontSize(12.0f);
+        fillColor(Palette::text);
+        textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
+        text(presetStripX + arrowW * 0.5f, btnY + btnH * 0.5f, "\xe2\x97\x84", nullptr);
+
+        // Name (clickable to open browser)
+        beginPath();
+        rect(presetStripX + arrowW, btnY, nameW, btnH);
+        fillColor(Color(0.1f, 0.1f, 0.1f, 1.0f));
+        fill();
+        fontSize(10.0f);
+        fillColor(Palette::text);
+        textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
+        const char* displayName = (fCurrentPresetIdx >= 0 && fCurrentPresetIdx < fPresetCount)
+            ? fPresetNames[fCurrentPresetIdx] : "(init)";
+        text(presetStripX + arrowW + nameW * 0.5f, btnY + btnH * 0.5f, displayName, nullptr);
+
+        // Right arrow [►]
+        beginPath();
+        roundedRect(presetStripX + arrowW + nameW, btnY, arrowW, btnH, 3.0f);
+        fillColor(Palette::outline);
+        fill();
+        fontSize(12.0f);
+        fillColor(Palette::text);
+        textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
+        text(presetStripX + arrowW + nameW + arrowW * 0.5f, btnY + btnH * 0.5f, "\xe2\x96\xba", nullptr);
     }
 
     // ── Stereo field ──────────────────────────────────────────────────────
@@ -335,17 +409,52 @@ protected:
         strokeWidth(1.0f);
         stroke();
 
+        // Stereo width boundary — shows the horizontal extent
+        // Width = fStereoCollapse (0=mono, 1=full)
+        const float panWidth = fStereoCollapse;
+        const float hBoxX = x + (1.0f - panWidth) * 0.5f * w;
+        const float hBoxW = w * panWidth;
+
+        if (fStereoCollapse < 0.99f && hBoxW > 2.0f)
+        {
+            beginPath();
+            roundedRect(hBoxX, y, hBoxW, h, 3.0f);
+            strokeColor(Color(Palette::highlight.red, Palette::highlight.green,
+                              Palette::highlight.blue, 0.4f));
+            strokeWidth(1.5f);
+            stroke();
+        }
+
+        // Texture boundary — shows the vertical collapse area
+        // Texture scales the vertical spread of points
+        const float vertExtent = fTexture;
+        const float vBoxY = y + (1.0f - vertExtent) * 0.5f * h;
+        const float vBoxH = h * vertExtent;
+
+        if (fTexture < 0.99f && vBoxH > 2.0f)
+        {
+            beginPath();
+            roundedRect(x, vBoxY, w, vBoxH, 3.0f);
+            strokeColor(Color(Palette::accent.red, Palette::accent.green,
+                              Palette::accent.blue, 0.4f));
+            strokeWidth(1.5f);
+            stroke();
+        }
+
         // Draw point nodes
         for (int i = 0; i < fPointCount; ++i)
         {
-            const float pan = fPointPan[i] * fTexture; // pan collapses with texture
-            const float px  = x + (pan + 1.0f) * 0.5f * w;
+            // Display: pan collapses with StereoCollapse, cutoff offset shown directly
+            float effPan = fPointPan[i] * fStereoCollapse;
 
-            // Y = cutoff offset. Centre line = 0. Up = positive offset. Down = negative.
-            // Map [-24, +24] to [bottom, top] with 0 at centre
-            const float cutoffNorm = fPointCutoffOffset[i] / 24.0f; // -1 to +1
-            const float scaledY = 0.5f + cutoffNorm * 0.5f * fTexture; // collapse to centre at texture=0
-            const float py  = y + h - scaledY * h;
+            // Scale offset display by Texture: at texture=0 all points collapse to centre,
+            // at texture=1 full vertical spread is shown
+            float effOffset = fPointCutoffOffset[i] * fTexture;
+
+            const float px = x + (effPan + 1.0f) * 0.5f * w;
+            const float cutoffNorm = effOffset / 24.0f;
+            const float scaledY = 0.5f + cutoffNorm * 0.5f;
+            const float py = y + h - scaledY * h;
 
             // Size = global feedback × per-point feedback
             const float effectiveFB = fFeedback * fPointFeedback[i];
@@ -387,8 +496,8 @@ protected:
             fontSize(11.0f);
             fillColor(Palette::bg);
             textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
-            const char* ftLabelsField[] = {"LP", "HP", "BP", "NT"};
-            const int ftIdx = static_cast<int>(fPointFilterType[i] + 0.5f) % 4;
+            const char* ftLabelsField[] = {"LP", "HP", "BP"};
+            const int ftIdx = static_cast<int>(fPointFilterType[i] + 0.5f) % 3;
             text(px, py, ftLabelsField[ftIdx], nullptr);
 
             // Store position for hit testing
@@ -396,62 +505,6 @@ protected:
             fPointScreenY[i] = py;
             fPointScreenR[i] = fbSize;
         }
-    }
-
-    // ── Waveform oscilloscope display ────────────────────────────────────
-    void drawWaveform(float x, float y, float w, float h)
-    {
-        // Dark inset background
-        beginPath();
-        roundedRect(x, y, w, h, 4.0f);
-        fillColor(Color(0.08f, 0.08f, 0.08f, 0.85f));
-        fill();
-        strokeColor(Palette::outline);
-        strokeWidth(0.5f);
-        stroke();
-
-        // Centre line
-        beginPath();
-        moveTo(x + 2.0f, y + h * 0.5f);
-        lineTo(x + w - 2.0f, y + h * 0.5f);
-        strokeColor(Color(1.0f, 1.0f, 1.0f, 0.1f));
-        strokeWidth(0.5f);
-        stroke();
-
-        // Animated waveform based on feedback/texture activity
-        // Use a phase counter that advances each frame for animation
-        fWavePhase += 0.05f + fFeedback * 0.15f;
-        if (fWavePhase > 100.0f) fWavePhase -= 100.0f;
-
-        const float amplitude = fFeedback * 0.8f + fTexture * 0.2f;
-        const float freq = 2.0f + fPitchShift * 0.1f;
-        const int numPoints = static_cast<int>(w - 4.0f);
-
-        if (amplitude > 0.01f)
-        {
-            beginPath();
-            for (int i = 0; i < numPoints; ++i)
-            {
-                const float t = static_cast<float>(i) / static_cast<float>(numPoints);
-                const float phase = fWavePhase + t * freq * 6.28f;
-                const float val = std::sin(phase) * amplitude
-                                + std::sin(phase * 2.3f + 1.0f) * amplitude * 0.4f
-                                + std::sin(phase * 0.7f + 2.0f) * amplitude * 0.3f;
-                const float py = y + h * 0.5f - val * h * 0.4f;
-                const float px = x + 2.0f + t * (w - 4.0f);
-
-                if (i == 0)
-                    moveTo(px, py);
-                else
-                    lineTo(px, py);
-            }
-            strokeColor(Color(Palette::accent.red, Palette::accent.green, Palette::accent.blue, 0.8f));
-            strokeWidth(1.5f);
-            stroke();
-        }
-
-        // Request continuous repaint for animation
-        repaint();
     }
 
     // ── Per-point panel (right side) ──────────────────────────────────────
@@ -508,7 +561,7 @@ protected:
 
         // Row 1: Filter Type buttons + Q + Cutoff
         // Filter type as 4 clickable buttons: [LP] [HP] [BP] [NT]
-        const float ftBtnW = (w - 20.0f) / 4.0f;
+        const float ftBtnW = (w - 20.0f) / 3.0f;
         const float ftBtnH = 16.0f;
         const float ftY    = row1Y;
         fFilterBtnX = x + 10.0f;
@@ -516,10 +569,10 @@ protected:
         fFilterBtnW = ftBtnW;
         fFilterBtnH = ftBtnH;
 
-        const char* ftLabels[] = {"LP", "HP", "BP", "NT"};
-        const int currentType = static_cast<int>(fPointFilterType[fSelectedPoint] + 0.5f) % 4;
+        const char* ftLabels[] = {"LP", "HP", "BP"};
+        const int currentType = static_cast<int>(fPointFilterType[fSelectedPoint] + 0.5f) % 3;
 
-        for (int t = 0; t < 4; ++t)
+        for (int t = 0; t < 3; ++t)
         {
             const float bx = fFilterBtnX + t * ftBtnW;
             beginPath();
@@ -582,8 +635,8 @@ protected:
         const float cy = y + h * 0.5f + 2.0f;
 
         // Group positions: FILTER | EFFECT | OUTPUT
-        // FILTER: Texture, Reso
-        // EFFECT: Feedback, Pitch, Glide
+        // FILTER: Texture, Width
+        // EFFECT: Feedback, Pitch
         // OUTPUT: Wet/Dry, In, Out
         const float groupW = w / 3.0f;
 
@@ -596,24 +649,23 @@ protected:
         text(x + groupW * 1.5f, y + 3.0f, "EFFECT", nullptr);
         text(x + groupW * 2.5f, y + 3.0f, "OUTPUT", nullptr);
 
-        // FILTER group: Texture, Reso (2 knobs)
+        // FILTER group: Texture, Width (2 knobs)
         const float fSpacing = groupW / 3.0f;
-        fGlobalKnobs[0].x = x + fSpacing;       fGlobalKnobs[0].y = cy; fGlobalKnobs[0].radius = knobR;
-        fGlobalKnobs[1].x = x + fSpacing * 2.0f; fGlobalKnobs[1].y = cy; fGlobalKnobs[1].radius = knobR;
+        fGlobalKnobs[0].x = x + fSpacing;            fGlobalKnobs[0].y = cy; fGlobalKnobs[0].radius = knobR;
+        fGlobalKnobs[6].x = x + fSpacing * 2.0f;     fGlobalKnobs[6].y = cy; fGlobalKnobs[6].radius = knobR;
 
-        // EFFECT group: Feedback, Pitch, Glide (3 knobs)
+        // EFFECT group: Feedback, Pitch (2 knobs)
         const float eStart = x + groupW;
-        const float eSpacing = groupW / 4.0f;
-        fGlobalKnobs[2].x = eStart + eSpacing;       fGlobalKnobs[2].y = cy; fGlobalKnobs[2].radius = knobR;
-        fGlobalKnobs[3].x = eStart + eSpacing * 2.0f; fGlobalKnobs[3].y = cy; fGlobalKnobs[3].radius = knobR;
-        fGlobalKnobs[7].x = eStart + eSpacing * 3.0f; fGlobalKnobs[7].y = cy; fGlobalKnobs[7].radius = knobR;
+        const float eSpacing = groupW / 3.0f;
+        fGlobalKnobs[1].x = eStart + eSpacing;       fGlobalKnobs[1].y = cy; fGlobalKnobs[1].radius = knobR;
+        fGlobalKnobs[2].x = eStart + eSpacing * 2.0f; fGlobalKnobs[2].y = cy; fGlobalKnobs[2].radius = knobR;
 
         // OUTPUT group: Wet/Dry, In, Out (3 knobs)
         const float oStart = x + groupW * 2.0f;
         const float oSpacing = groupW / 4.0f;
-        fGlobalKnobs[4].x = oStart + oSpacing;       fGlobalKnobs[4].y = cy; fGlobalKnobs[4].radius = knobR;
-        fGlobalKnobs[5].x = oStart + oSpacing * 2.0f; fGlobalKnobs[5].y = cy; fGlobalKnobs[5].radius = knobR;
-        fGlobalKnobs[6].x = oStart + oSpacing * 3.0f; fGlobalKnobs[6].y = cy; fGlobalKnobs[6].radius = knobR;
+        fGlobalKnobs[3].x = oStart + oSpacing;       fGlobalKnobs[3].y = cy; fGlobalKnobs[3].radius = knobR;
+        fGlobalKnobs[4].x = oStart + oSpacing * 2.0f; fGlobalKnobs[4].y = cy; fGlobalKnobs[4].radius = knobR;
+        fGlobalKnobs[5].x = oStart + oSpacing * 3.0f; fGlobalKnobs[5].y = cy; fGlobalKnobs[5].radius = knobR;
 
         for (int i = 0; i < fNumGlobalKnobs; ++i)
             drawKnob(fGlobalKnobs[i]);
@@ -632,6 +684,317 @@ protected:
         fillColor(Palette::bg);
         textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
         text(fGlobalRndBtnX + fGlobalRndBtnW * 0.5f, fGlobalRndBtnY + fGlobalRndBtnH * 0.5f, "RND", nullptr);
+    }
+
+    // ── Menu overlay ──────────────────────────────────────────────────────
+    void drawMenuOverlay(float w, float h)
+    {
+        // Semi-transparent background
+        beginPath();
+        rect(0, 0, w, h);
+        fillColor(Color(0.0f, 0.0f, 0.0f, 0.7f));
+        fill();
+
+        // Panel centred — larger
+        const float panelW = w * 0.8f;
+        const float panelH = h * 0.85f;
+        const float panelX = (w - panelW) * 0.5f;
+        const float panelY = (h - panelH) * 0.5f;
+
+        beginPath();
+        roundedRect(panelX, panelY, panelW, panelH, 8.0f);
+        fillColor(Color(0.12f, 0.12f, 0.12f, 1.0f));
+        fill();
+        strokeColor(Palette::outline);
+        strokeWidth(1.0f);
+        stroke();
+
+        // Tab bar at top of panel (2 tabs: Settings, Info)
+        const float tabH = 34.0f;
+        const float tabW = panelW / 2.0f;
+        const char* tabLabels[] = {"SETTINGS", "INFO"};
+
+        for (int t = 0; t < 2; ++t)
+        {
+            const float tx = panelX + t * tabW;
+            beginPath();
+            rect(tx, panelY, tabW, tabH);
+            fillColor(fMenuTab == t ? Palette::accent : Color(0.18f, 0.18f, 0.18f, 1.0f));
+            fill();
+
+            fontSize(15.4f);  // 11 * 1.4
+            fontFaceId(fFontId);
+            fillColor(fMenuTab == t ? Palette::bg : Palette::text);
+            textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
+            text(tx + tabW * 0.5f, panelY + tabH * 0.5f, tabLabels[t], nullptr);
+        }
+
+        // Content area
+        const float contentX = panelX + 20.0f;
+        const float contentY = panelY + tabH + 20.0f;
+        const float contentW = panelW - 40.0f;
+        const float contentH = panelH - tabH - 40.0f;
+
+        if (fMenuTab == 0)
+            drawMenuSettings(contentX, contentY, contentW, contentH);
+        else
+            drawMenuInfo(contentX, contentY, contentW, contentH);
+
+        // Close hint
+        fontSize(12.6f);  // 9 * 1.4
+        fillColor(Color(1.0f, 1.0f, 1.0f, 0.4f));
+        textAlign(ALIGN_CENTER | ALIGN_BOTTOM);
+        text(w * 0.5f, panelY + panelH - 8.0f, "Click outside or press ESC to close", nullptr);
+    }
+
+    void drawMenuSettings(float x, float y, float w, float h)
+    {
+        (void)w; (void)h;
+        fontSize(16.8f);  // 12 * 1.4
+        fontFaceId(fFontId);
+        fillColor(Palette::text);
+        textAlign(ALIGN_LEFT | ALIGN_TOP);
+        text(x, y, "Point Count", nullptr);
+
+        // Point count: [-] N [+]
+        const float pcY = y + 28.0f;
+        const float pcBtnSz = 28.0f;
+
+        // [-]
+        fPtCountMinusX = x;
+        fPtCountBtnY = pcY;
+        fPtCountBtnSize = pcBtnSz;
+        beginPath();
+        roundedRect(x, pcY, pcBtnSz, pcBtnSz, 4.0f);
+        fillColor(Palette::outline);
+        fill();
+        fontSize(19.6f);  // 14 * 1.4
+        fillColor(Palette::text);
+        textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
+        text(x + pcBtnSz * 0.5f, pcY + pcBtnSz * 0.5f, "-", nullptr);
+
+        // Count
+        char pcBuf[8];
+        std::snprintf(pcBuf, sizeof(pcBuf), "%d", fPointCount);
+        fontSize(19.6f);
+        fillColor(Palette::highlight);
+        textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
+        text(x + pcBtnSz + 20.0f, pcY + pcBtnSz * 0.5f, pcBuf, nullptr);
+
+        // [+]
+        fPtCountPlusX = x + pcBtnSz + 40.0f;
+        beginPath();
+        roundedRect(fPtCountPlusX, pcY, pcBtnSz, pcBtnSz, 4.0f);
+        fillColor(Palette::outline);
+        fill();
+        fontSize(19.6f);
+        fillColor(Palette::text);
+        textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
+        text(fPtCountPlusX + pcBtnSz * 0.5f, pcY + pcBtnSz * 0.5f, "+", nullptr);
+
+        // Limiter info
+        fontSize(16.8f);
+        fillColor(Palette::text);
+        textAlign(ALIGN_LEFT | ALIGN_TOP);
+        text(x, pcY + 55.0f, "Output Limiter", nullptr);
+
+        fontSize(14.0f);  // 10 * 1.4
+        fillColor(Palette::sage);
+        text(x, pcY + 80.0f, "Ceiling: 0 dBFS | Always active", nullptr);
+        text(x, pcY + 100.0f, "Protects speakers and ears from feedback spikes.", nullptr);
+    }
+
+    void drawMenuInfo(float x, float y, float w, float h)
+    {
+        (void)w; (void)h;
+        fontSize(19.6f);  // 14 * 1.4
+        fontFaceId(fFontId);
+        fillColor(Palette::accent);
+        textAlign(ALIGN_LEFT | ALIGN_TOP);
+        text(x, y, "OCTOFILTER", nullptr);
+
+        fontSize(14.0f);  // 10 * 1.4
+        fillColor(Palette::text);
+        text(x, y + 28.0f, "Version 0.9.0", nullptr);
+        text(x, y + 48.0f, "Multi-point stereo filter with pitch-shifted feedback", nullptr);
+
+        fillColor(Palette::sage);
+        text(x, y + 78.0f, "Created by Henry (@HJ959)", nullptr);
+        text(x, y + 98.0f, "Built with Kiro CLI", nullptr);
+
+        text(x, y + 130.0f, "Special Thanks:", nullptr);
+        fillColor(Palette::text);
+        text(x, y + 150.0f, "  @cosmojamsoun — testing & feedback", nullptr);
+        text(x, y + 170.0f, "  @estero_connor — testing & feedback", nullptr);
+        text(x, y + 190.0f, "  @nicholasfaris — testing & feedback", nullptr);
+
+        fillColor(Palette::sage);
+        text(x, y + 225.0f, "Colour palette: Blodyn Tatws", nullptr);
+        text(x, y + 245.0f, "(inspired by a potato flower from the garden)", nullptr);
+    }
+
+    // ── Presets overlay (dropdown browser) ───────────────────────────────
+    void drawPresetsOverlay(float w, float h)
+    {
+        // Semi-transparent background
+        beginPath();
+        rect(0, 0, w, h);
+        fillColor(Color(0.0f, 0.0f, 0.0f, 0.5f));
+        fill();
+
+        // Dropdown panel below the top bar
+        const float panelX = 20.0f;
+        const float panelY = 36.0f;
+        const float panelW = w - 40.0f;
+        const float panelH = h - 56.0f;
+
+        beginPath();
+        roundedRect(panelX, panelY, panelW, panelH, 6.0f);
+        fillColor(Color(0.1f, 0.1f, 0.1f, 0.97f));
+        fill();
+        strokeColor(Palette::outline);
+        strokeWidth(1.0f);
+        stroke();
+
+        // Content area with scroll
+        const float contentX = panelX + 10.0f;
+        float cy = panelY + 10.0f;
+        const float rowH = 22.0f;
+        const float folderH = 26.0f;
+        const float maxY = panelY + panelH - 40.0f; // leave room for SAVE button
+
+        fPresetSaveBtnX = -1; // reset
+
+        if (fPresetCount == 0)
+        {
+            fontSize(14.0f);
+            fontFaceId(fFontId);
+            fillColor(Palette::sage);
+            textAlign(ALIGN_LEFT | ALIGN_TOP);
+            text(contentX, cy, "No presets found. Click SAVE to create one.", nullptr);
+            cy += 25.0f;
+            fontSize(11.0f);
+            fillColor(Color(1.0f, 1.0f, 1.0f, 0.4f));
+            #ifdef _WIN32
+            text(contentX, cy, "Presets folder: %APPDATA%\\Octofilter\\Presets\\", nullptr);
+            #else
+            text(contentX, cy, "Presets folder: ~/Library/Application Support/Octofilter/Presets/", nullptr);
+            #endif
+        }
+        else
+        {
+            // Draw folder-grouped list
+            for (int fi = 0; fi < fNumFolders && cy < maxY; ++fi)
+            {
+                // Folder header
+                fontSize(11.0f);
+                fontFaceId(fFontId);
+                fillColor(Palette::sage);
+                textAlign(ALIGN_LEFT | ALIGN_MIDDLE);
+                text(contentX, cy + folderH * 0.5f, fFolderNames[fi], nullptr);
+                cy += folderH;
+
+                // Presets in this folder
+                for (int pi = 0; pi < fFolderCount[fi] && cy < maxY; ++pi)
+                {
+                    const int idx = fFolderStart[fi] + pi;
+                    const bool isCurrent = (idx == fCurrentPresetIdx);
+                    const bool isHovered = (idx == fPresetHoverIdx);
+                    const float rowW = panelW - 20.0f;
+
+                    beginPath();
+                    roundedRect(contentX, cy, rowW, rowH - 2.0f, 2.0f);
+                    if (isCurrent)
+                        fillColor(Color(Palette::accent.red, Palette::accent.green, Palette::accent.blue, 0.3f));
+                    else if (isHovered)
+                        fillColor(Color(0.22f, 0.22f, 0.22f, 1.0f));
+                    else
+                        fillColor(Color(0.15f, 0.15f, 0.15f, 1.0f));
+                    fill();
+
+                    fontSize(12.0f);
+                    fillColor(isCurrent ? Palette::accent : Palette::text);
+                    textAlign(ALIGN_LEFT | ALIGN_MIDDLE);
+                    text(contentX + 8.0f, cy + (rowH - 2.0f) * 0.5f, fPresetNames[idx], nullptr);
+
+                    if (isCurrent)
+                    {
+                        // Checkmark
+                        fillColor(Palette::accent);
+                        textAlign(ALIGN_RIGHT | ALIGN_MIDDLE);
+                        text(contentX + rowW - 28.0f, cy + (rowH - 2.0f) * 0.5f, "\xe2\x9c\x93", nullptr);
+                    }
+
+                    // X delete button (always visible on hover, dimmed otherwise)
+                    if (isHovered || isCurrent)
+                    {
+                        fontSize(11.0f);
+                        fillColor(isHovered ? Color(1.0f, 0.4f, 0.4f, 1.0f) : Color(0.5f, 0.3f, 0.3f, 1.0f));
+                        textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
+                        text(contentX + rowW - 12.0f, cy + (rowH - 2.0f) * 0.5f, "X", nullptr);
+                    }
+
+                    cy += rowH;
+                }
+
+                cy += 4.0f; // gap between folders
+            }
+        }
+
+        // Bottom bar: SAVE button or naming input
+        const float bottomY = panelY + panelH - 34.0f;
+
+        if (fNamingPreset)
+        {
+            // Show text input field
+            const float inputX = panelX + 15.0f;
+            const float inputW = panelW - 30.0f;
+            const float inputH = 26.0f;
+
+            beginPath();
+            roundedRect(inputX, bottomY, inputW, inputH, 4.0f);
+            fillColor(Color(0.05f, 0.05f, 0.05f, 1.0f));
+            fill();
+            strokeColor(Palette::accent);
+            strokeWidth(1.5f);
+            stroke();
+
+            // Label
+            fontSize(10.0f);
+            fillColor(Palette::sage);
+            textAlign(ALIGN_LEFT | ALIGN_BOTTOM);
+            text(inputX + 4.0f, bottomY - 2.0f, "Name your preset (Enter to save, Esc to cancel):", nullptr);
+
+            // Input text with cursor
+            fontSize(13.0f);
+            fillColor(Palette::text);
+            textAlign(ALIGN_LEFT | ALIGN_MIDDLE);
+            char displayBuf[64];
+            std::snprintf(displayBuf, sizeof(displayBuf), "%s|", fPresetNameInput);
+            text(inputX + 8.0f, bottomY + inputH * 0.5f, displayBuf, nullptr);
+
+            fPresetSaveBtnX = -1; // disable save button hit area
+        }
+        else
+        {
+            // Show SAVE button
+            const float saveBtnW = 80.0f;
+            const float saveBtnH = 26.0f;
+            const float saveBtnX = panelX + panelW - saveBtnW - 15.0f;
+            fPresetSaveBtnX = saveBtnX;
+            fPresetSaveBtnY = bottomY;
+            fPresetSaveBtnW = saveBtnW;
+            fPresetSaveBtnH = saveBtnH;
+
+            beginPath();
+            roundedRect(saveBtnX, bottomY, saveBtnW, saveBtnH, 4.0f);
+            fillColor(Palette::highlight);
+            fill();
+            fontSize(12.0f);
+            fillColor(Palette::bg);
+            textAlign(ALIGN_CENTER | ALIGN_MIDDLE);
+            text(saveBtnX + saveBtnW * 0.5f, bottomY + saveBtnH * 0.5f, "SAVE", nullptr);
+        }
     }
 
     // ── Knob drawing ──────────────────────────────────────────────────────
@@ -707,11 +1070,199 @@ protected:
 
         if (ev.press)
         {
+            // ── Menu overlay interactions (when open, intercept all clicks) ──
+            if (fMenuOpen)
+            {
+                const float w = static_cast<float>(getWidth());
+                const float h = static_cast<float>(getHeight());
+                const float panelW = w * 0.8f;
+                const float panelH = h * 0.85f;
+                const float panelX = (w - panelW) * 0.5f;
+                const float panelY = (h - panelH) * 0.5f;
+
+                // Click inside panel?
+                if (mx >= panelX && mx <= panelX + panelW &&
+                    my >= panelY && my <= panelY + panelH)
+                {
+                    // Tab clicks
+                    const float tabH = 34.0f;
+                    if (my <= panelY + tabH)
+                    {
+                        const float tabW = panelW / 2.0f;
+                        int clickedTab = static_cast<int>((mx - panelX) / tabW);
+                        if (clickedTab >= 0 && clickedTab < 2)
+                        {
+                            fMenuTab = clickedTab;
+                            repaint();
+                        }
+                    }
+                    // Point count [-][+] buttons (in Settings tab)
+                    else if (fMenuTab == 0)
+                    {
+                        if (mx >= fPtCountMinusX && mx <= fPtCountMinusX + fPtCountBtnSize &&
+                            my >= fPtCountBtnY && my <= fPtCountBtnY + fPtCountBtnSize)
+                        {
+                            if (fPointCount > 1) {
+                                fPointCount--;
+                                setParameterValue(kGlobalPointCount, static_cast<float>(fPointCount));
+                                if (fSelectedPoint >= fPointCount) fSelectedPoint = -1;
+                                repaint();
+                            }
+                        }
+                        else if (mx >= fPtCountPlusX && mx <= fPtCountPlusX + fPtCountBtnSize &&
+                                 my >= fPtCountBtnY && my <= fPtCountBtnY + fPtCountBtnSize)
+                        {
+                            if (fPointCount < 8) {
+                                fPointCount++;
+                                setParameterValue(kGlobalPointCount, static_cast<float>(fPointCount));
+                                repaint();
+                            }
+                        }
+                    }
+                    return true;
+                }
+                else
+                {
+                    // Click outside panel — close menu
+                    fMenuOpen = false;
+                    repaint();
+                    return true;
+                }
+            }
+
+            // ── Presets overlay interactions ──────────────────────────────────
+            if (fPresetsOpen)
+            {
+                const float w = static_cast<float>(getWidth());
+                const float h = static_cast<float>(getHeight());
+                const float panelX = 20.0f;
+                const float panelY = 36.0f;
+                const float panelW = w - 40.0f;
+                const float panelH = h - 56.0f;
+
+                if (mx >= panelX && mx <= panelX + panelW &&
+                    my >= panelY && my <= panelY + panelH)
+                {
+                    // Save button — enter naming mode
+                    if (fPresetSaveBtnX >= 0 && !fNamingPreset &&
+                        mx >= fPresetSaveBtnX && mx <= fPresetSaveBtnX + fPresetSaveBtnW &&
+                        my >= fPresetSaveBtnY && my <= fPresetSaveBtnY + fPresetSaveBtnH)
+                    {
+                        fNamingPreset = true;
+                        fPresetNameLen = 0;
+                        fPresetNameInput[0] = '\0';
+                        repaint();
+                        return true;
+                    }
+
+                    // Preset list clicks — iterate through folders to find which one was clicked
+                    const float contentX = panelX + 10.0f;
+                    const float rowW = panelW - 20.0f;
+                    float cy = panelY + 10.0f;
+                    const float rowH = 22.0f;
+                    const float folderH = 26.0f;
+
+                    for (int fi = 0; fi < fNumFolders; ++fi)
+                    {
+                        cy += folderH; // skip folder header
+                        for (int pi = 0; pi < fFolderCount[fi]; ++pi)
+                        {
+                            if (my >= cy && my < cy + rowH)
+                            {
+                                const int idx = fFolderStart[fi] + pi;
+
+                                // X button is the rightmost 20px of the row
+                                if (mx >= contentX + rowW - 20.0f)
+                                {
+                                    deletePreset(idx);
+                                    repaint();
+                                    return true;
+                                }
+
+                                // Otherwise load the preset
+                                loadFactoryPreset(idx);
+                                fPresetsOpen = false;
+                                repaint();
+                                return true;
+                            }
+                            cy += rowH;
+                        }
+                        cy += 4.0f; // gap
+                    }
+                    return true;
+                }
+                else
+                {
+                    fPresetsOpen = false;
+                    repaint();
+                    return true;
+                }
+            }
+
+            // ── Menu button ──────────────────────────────────────────────────
+            if (mx >= fMenuBtnX && mx <= fMenuBtnX + fMenuBtnW &&
+                my >= fMenuBtnY && my <= fMenuBtnY + fMenuBtnH)
+            {
+                fMenuOpen = !fMenuOpen;
+                fPresetsOpen = false;
+                repaint();
+                return true;
+            }
+
+            // ── Preset strip: [◄] Name [►] ──────────────────────────────────
+            if (my >= fPresetStripY && my <= fPresetStripY + fPresetStripH &&
+                mx >= fPresetStripX && mx <= fPresetStripX + fPresetStripW)
+            {
+                const float leftArrowEnd = fPresetStripX + fPresetArrowW;
+                const float rightArrowStart = fPresetStripX + fPresetArrowW + fPresetNameW;
+
+                if (mx < leftArrowEnd)
+                {
+                    // Left arrow — previous preset
+                    if (fPresetCount == 0) scanPresets();
+                    if (fPresetCount > 0)
+                    {
+                        if (fCurrentPresetIdx <= 0)
+                            fCurrentPresetIdx = fPresetCount - 1;
+                        else
+                            fCurrentPresetIdx--;
+                        loadFactoryPreset(fCurrentPresetIdx);
+                    }
+                    repaint();
+                    return true;
+                }
+                else if (mx >= rightArrowStart)
+                {
+                    // Right arrow — next preset
+                    if (fPresetCount == 0) scanPresets();
+                    if (fPresetCount > 0)
+                    {
+                        if (fCurrentPresetIdx >= fPresetCount - 1)
+                            fCurrentPresetIdx = 0;
+                        else
+                            fCurrentPresetIdx++;
+                        loadFactoryPreset(fCurrentPresetIdx);
+                    }
+                    repaint();
+                    return true;
+                }
+                else
+                {
+                    // Click on name — open/close browser
+                    fPresetsOpen = !fPresetsOpen;
+                    fMenuOpen = false;
+                    if (fPresetsOpen) scanPresets();
+                    repaint();
+                    return true;
+                }
+            }
+
             // Randomise button — do it from UI side so visuals update immediately
             if (mx >= fRandomiseBtnX && mx <= fRandomiseBtnX + fRandomiseBtnW &&
                 my >= fRandomiseBtnY && my <= fRandomiseBtnY + fRandomiseBtnH)
             {
                 doUIRandomise();
+                clampPointsToTexture();
                 repaint();
                 return true;
             }
@@ -728,11 +1279,11 @@ protected:
 
             // Filter type buttons (only when a point is selected)
             if (fSelectedPoint >= 0 &&
-                mx >= fFilterBtnX && mx <= fFilterBtnX + fFilterBtnW * 4.0f &&
+                mx >= fFilterBtnX && mx <= fFilterBtnX + fFilterBtnW * 3.0f &&
                 my >= fFilterBtnY && my <= fFilterBtnY + fFilterBtnH)
             {
                 const int btn = static_cast<int>((mx - fFilterBtnX) / fFilterBtnW);
-                if (btn >= 0 && btn < 4)
+                if (btn >= 0 && btn < 3)
                 {
                     fPointFilterType[fSelectedPoint] = static_cast<float>(btn);
                     setParameterValue(ppIdx(fSelectedPoint, kPPFilterType), static_cast<float>(btn));
@@ -748,6 +1299,7 @@ protected:
                 my >= fPPRndBtnY && my <= fPPRndBtnY + fPPRndBtnH)
             {
                 doRandomisePointOnly();
+                clampPointsToTexture();
                 repaint();
                 return true;
             }
@@ -757,16 +1309,16 @@ protected:
                 my >= fGlobalRndBtnY && my <= fGlobalRndBtnY + fGlobalRndBtnH)
             {
                 doRandomiseGlobalsOnly();
+                clampPointsToTexture();
                 repaint();
                 return true;
             }
 
-            // Point count buttons
+            // Point count [-] [+] buttons (top bar)
             if (mx >= fPtCountMinusX && mx <= fPtCountMinusX + fPtCountBtnSize &&
                 my >= fPtCountBtnY && my <= fPtCountBtnY + fPtCountBtnSize)
             {
-                if (fPointCount > 1)
-                {
+                if (fPointCount > 1) {
                     fPointCount--;
                     setParameterValue(kGlobalPointCount, static_cast<float>(fPointCount));
                     if (fSelectedPoint >= fPointCount) fSelectedPoint = -1;
@@ -777,8 +1329,7 @@ protected:
             if (mx >= fPtCountPlusX && mx <= fPtCountPlusX + fPtCountBtnSize &&
                 my >= fPtCountBtnY && my <= fPtCountBtnY + fPtCountBtnSize)
             {
-                if (fPointCount < 8)
-                {
+                if (fPointCount < 8) {
                     fPointCount++;
                     setParameterValue(kGlobalPointCount, static_cast<float>(fPointCount));
                     repaint();
@@ -864,6 +1415,7 @@ protected:
             for (int j = 0; j < 8; ++j) fPointSelected[j] = false;
             fSelectedPoint = -1;
             repaint();
+            return true;
         }
         else
         {
@@ -875,6 +1427,7 @@ protected:
                 repaint();
             }
             fDraggingPoint = false;
+            return true;
         }
         return false;
     }
@@ -883,6 +1436,41 @@ protected:
     {
         const float my = ev.pos.getY();
         const float mx = ev.pos.getX();
+
+        // Preset browser hover tracking
+        if (fPresetsOpen)
+        {
+            const float w = static_cast<float>(getWidth());
+            const float panelX = 20.0f;
+            const float panelY = 36.0f;
+            const float panelW = w - 40.0f;
+            const float contentX = panelX + 10.0f;
+            const float rowH = 22.0f;
+            const float folderH = 26.0f;
+
+            int newHover = -1;
+            float cy = panelY + 10.0f;
+            for (int fi = 0; fi < fNumFolders; ++fi)
+            {
+                cy += folderH;
+                for (int pi = 0; pi < fFolderCount[fi]; ++pi)
+                {
+                    if (mx >= contentX && mx <= contentX + panelW - 20.0f &&
+                        my >= cy && my < cy + rowH)
+                    {
+                        newHover = fFolderStart[fi] + pi;
+                    }
+                    cy += rowH;
+                }
+                cy += 4.0f;
+            }
+
+            if (newHover != fPresetHoverIdx)
+            {
+                fPresetHoverIdx = newHover;
+                repaint();
+            }
+        }
 
         // Knob dragging
         if (fActiveKnob)
@@ -919,6 +1507,8 @@ protected:
             const float deltaPan = (mx - fDragStartMX) / fFieldW * 2.0f;
             const float deltaOffset = -(my - fDragStartMY) / fFieldH * 48.0f;
 
+            // Send FULL-RANGE values — DSP applies texture scaling internally.
+            // Clamp only to parameter bounds (not texture bounds).
             for (int i = 0; i < fPointCount; ++i)
             {
                 if (!fPointSelected[i]) continue;
@@ -961,13 +1551,81 @@ protected:
                 // Scroll changes feedback (size)
                 float fb = fPointFeedback[i] + ev.delta.getY() * 0.05f;
                 if (fb < 0.0f) fb = 0.0f;
-                if (fb > 1.0f) fb = 1.0f;
+                if (fb > 1.1f) fb = 1.1f;
                 fPointFeedback[i] = fb;
                 setParameterValue(ppIdx(i, kPPFeedback), fb);
                 if (i == fSelectedPoint) syncPerPointKnobs();
                 repaint();
                 return true;
             }
+        }
+        return false;
+    }
+
+    bool onKeyboard(const KeyboardEvent& ev) override
+    {
+        if (ev.press && ev.key == 27) // ESC
+        {
+            if (fNamingPreset)
+            {
+                fNamingPreset = false;
+                repaint();
+                return true;
+            }
+            if (fMenuOpen || fPresetsOpen)
+            {
+                fMenuOpen = false;
+                fPresetsOpen = false;
+                repaint();
+                return true;
+            }
+        }
+
+        // Preset naming: Enter confirms, Backspace deletes, printable chars appended
+        if (fNamingPreset && ev.press)
+        {
+            if (ev.key == 13 || ev.key == 10) // Enter
+            {
+                if (fPresetNameLen > 0)
+                {
+                    savePresetWithName(fPresetNameInput);
+                    fNamingPreset = false;
+                    repaint();
+                }
+                return true;
+            }
+            else if (ev.key == 8 || ev.key == 127) // Backspace / Delete
+            {
+                if (fPresetNameLen > 0)
+                {
+                    fPresetNameLen--;
+                    fPresetNameInput[fPresetNameLen] = '\0';
+                    repaint();
+                }
+                return true;
+            }
+            else if (ev.key >= 32 && ev.key < 127 && fPresetNameLen < 50)
+            {
+                // Printable ASCII character
+                fPresetNameInput[fPresetNameLen++] = static_cast<char>(ev.key);
+                fPresetNameInput[fPresetNameLen] = '\0';
+                repaint();
+                return true;
+            }
+            return true; // consume all keys when naming
+        }
+
+        return false;
+    }
+
+    bool onCharacterInput(const CharacterInputEvent& ev) override
+    {
+        // Handle character input for preset naming (covers non-ASCII via DPF)
+        if (fNamingPreset)
+        {
+            // Already handled in onKeyboard for ASCII
+            (void)ev;
+            return true;
         }
         return false;
     }
@@ -982,13 +1640,12 @@ private:
             fGlobalKnobs[fNumGlobalKnobs++] = k;
         };
         add(kGlobalTexture,    0.0f,  1.0f,  0.5f,   "Texture");
-        add(kGlobalResonance,  0.1f,  20.0f, 0.707f, "Reso");
         add(kGlobalFeedback,   0.0f,  1.0f,  0.3f,   "Feedback");
         add(kGlobalPitchShift, -24.f, 24.f,  0.0f,   "Pitch");
         add(kGlobalWetDry,     0.0f,  1.0f,  1.0f,   "Wet/Dry");
         add(kGlobalInputGain,  -24.f, 24.f,  0.0f,   "In");
         add(kGlobalOutputGain, -24.f, 24.f,  0.0f,   "Out");
-        add(kGlobalGlideTime,  10.f,  2000.f,200.f,  "Glide");
+        add(kGlobalStereoCollapse, 0.0f, 1.0f, 1.0f, "Width");
     }
 
     void setupPerPointKnobs()
@@ -999,10 +1656,10 @@ private:
             fPPKnobs[i].label = lbl; fPPKnobs[i].paramIndex = paramIdx;
         };
         set(0, 0.0f, 3.0f, 0.0f,   "Type",   0);
-        set(1, 0.0f, 20.0f, 0.0f,  "Q",      0);
+        set(1, 2.5f, 20.0f, 5.0f,  "Q",      0);
         set(2, -1.0f, 1.0f, 0.0f,  "Pan",    0);
         set(3, 0.0f, 2.0f, 1.0f,   "Level",  0);
-        set(4, 0.0f, 1.0f, 0.0f,   "FB",     0);
+        set(4, 0.0f, 1.1f, 0.0f,   "FB",     0);
         set(5, -24.f, 24.f, 0.0f,  "Pitch",  0);
         set(6, 0.0f, 24.f, 0.0f,  "Cutoff", 0);  // magnitude only (0=centre, 24=edge)
     }
@@ -1026,17 +1683,399 @@ private:
             fGlobalKnobs[idx].value = value;
     }
 
+    void loadFactoryPreset(int idx)
+    {
+        if (idx < 0 || idx >= fPresetCount) return;
+
+        char dir[512];
+        getPresetDir(dir, sizeof(dir));
+        char path[512];
+
+        if (fPresetFolders[idx][0] != '\0')
+        {
+            #ifdef _WIN32
+            std::snprintf(path, sizeof(path), "%s\\%s\\%s.octopreset", dir, fPresetFolders[idx], fPresetNames[idx]);
+            #else
+            std::snprintf(path, sizeof(path), "%s/%s/%s.octopreset", dir, fPresetFolders[idx], fPresetNames[idx]);
+            #endif
+        }
+        else
+        {
+            #ifdef _WIN32
+            std::snprintf(path, sizeof(path), "%s\\%s.octopreset", dir, fPresetNames[idx]);
+            #else
+            std::snprintf(path, sizeof(path), "%s/%s.octopreset", dir, fPresetNames[idx]);
+            #endif
+        }
+
+        FILE* f = std::fopen(path, "r");
+        if (!f) return;
+
+        char buf[2048] = {};
+        size_t len = std::fread(buf, 1, sizeof(buf) - 1, f);
+        std::fclose(f);
+        buf[len] = '\0';
+
+        setState("octofilter_state", buf);
+        fCurrentPresetIdx = idx;
+    }
+
+    void savePreset()
+    {
+        // Fallback: auto-generate name
+        static int saveCounter = 0;
+        char name[64];
+        std::snprintf(name, sizeof(name), "Preset %03d", ++saveCounter);
+        savePresetWithName(name);
+    }
+
+    void savePresetWithName(const char* name)
+    {
+        char dir[512];
+        getPresetDir(dir, sizeof(dir));
+
+        // Save into "User" subfolder
+        char userDir[512];
+        #ifdef _WIN32
+        {
+            const char* appdata = std::getenv("APPDATA");
+            char base[512];
+            std::snprintf(base, sizeof(base), "%s\\Octofilter", appdata ? appdata : "C:");
+            CreateDirectoryA(base, nullptr);
+            CreateDirectoryA(dir, nullptr);
+            std::snprintf(userDir, sizeof(userDir), "%s\\User", dir);
+            CreateDirectoryA(userDir, nullptr);
+        }
+        #else
+        {
+            const char* home = std::getenv("HOME");
+            char base[512];
+            std::snprintf(base, sizeof(base), "%s/Library/Application Support/Octofilter", home ? home : "/tmp");
+            mkdir(base, 0755);
+            mkdir(dir, 0755);
+            std::snprintf(userDir, sizeof(userDir), "%s/User", dir);
+            mkdir(userDir, 0755);
+        }
+        #endif
+
+        char path[512];
+        #ifdef _WIN32
+        std::snprintf(path, sizeof(path), "%s\\%s.octopreset", userDir, name);
+        #else
+        std::snprintf(path, sizeof(path), "%s/%s.octopreset", userDir, name);
+        #endif
+
+        // Serialize current state
+        char buf[2048] = {};
+        int pos = 0;
+        pos += std::snprintf(buf + pos, sizeof(buf) - pos,
+            "texture=%.4f\nfeedback=%.4f\npitch=%.4f\nwetdry=%.4f\n"
+            "width=%.4f\nharmonic=%.0f\npoints=%d\n",
+            fTexture, fFeedback, fPitchShift, fWetDry,
+            fStereoCollapse, fHarmonicMode, fPointCount);
+
+        for (int i = 0; i < 8; ++i)
+        {
+            pos += std::snprintf(buf + pos, sizeof(buf) - pos,
+                "co%d=%.4f\nft%d=%.0f\nps%d=%.4f\nfb%d=%.4f\nq%d=%.4f\npn%d=%.4f\nlv%d=%.4f\n",
+                i, fPointCutoffOffset[i],
+                i, fPointFilterType[i],
+                i, fPointPitchShift[i],
+                i, fPointFeedback[i],
+                i, fPointQ[i],
+                i, fPointPan[i],
+                i, fPointLevel[i]);
+        }
+
+        FILE* f = std::fopen(path, "w");
+        if (f)
+        {
+            std::fwrite(buf, 1, std::strlen(buf), f);
+            std::fclose(f);
+        }
+
+        scanPresets();
+
+        // Set current to the newly saved preset
+        for (int i = 0; i < fPresetCount; ++i)
+        {
+            if (std::strcmp(fPresetNames[i], name) == 0)
+            {
+                fCurrentPresetIdx = i;
+                break;
+            }
+        }
+    }
+
+    void deletePreset(int idx)
+    {
+        if (idx < 0 || idx >= fPresetCount) return;
+
+        char dir[512];
+        getPresetDir(dir, sizeof(dir));
+        char path[512];
+
+        if (fPresetFolders[idx][0] != '\0')
+        {
+            #ifdef _WIN32
+            std::snprintf(path, sizeof(path), "%s\\%s\\%s.octopreset", dir, fPresetFolders[idx], fPresetNames[idx]);
+            #else
+            std::snprintf(path, sizeof(path), "%s/%s/%s.octopreset", dir, fPresetFolders[idx], fPresetNames[idx]);
+            #endif
+        }
+        else
+        {
+            #ifdef _WIN32
+            std::snprintf(path, sizeof(path), "%s\\%s.octopreset", dir, fPresetNames[idx]);
+            #else
+            std::snprintf(path, sizeof(path), "%s/%s.octopreset", dir, fPresetNames[idx]);
+            #endif
+        }
+
+        std::remove(path);
+
+        // If we deleted the current preset, reset
+        if (fCurrentPresetIdx == idx)
+            fCurrentPresetIdx = -1;
+        else if (fCurrentPresetIdx > idx)
+            fCurrentPresetIdx--;
+
+        scanPresets();
+    }
+
+    void scanPresets()
+    {
+        fPresetCount = 0;
+        fNumFolders = 0;
+        char dir[512];
+        getPresetDir(dir, sizeof(dir));
+
+        #ifdef _WIN32
+        // Scan for subfolders first
+        char folderPattern[512];
+        std::snprintf(folderPattern, sizeof(folderPattern), "%s\\*", dir);
+        WIN32_FIND_DATAA fd;
+        HANDLE hFind = FindFirstFileA(folderPattern, &fd);
+        if (hFind != INVALID_HANDLE_VALUE)
+        {
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                if (fd.cFileName[0] == '.') continue;
+                if (fNumFolders >= kMaxFolders) break;
+
+                // Store folder name
+                std::strncpy(fFolderNames[fNumFolders], fd.cFileName, 63);
+                fFolderNames[fNumFolders][63] = '\0';
+                fFolderStart[fNumFolders] = fPresetCount;
+
+                // Scan presets in this folder
+                char presetPattern[512];
+                std::snprintf(presetPattern, sizeof(presetPattern), "%s\\%s\\*.octopreset", dir, fd.cFileName);
+                WIN32_FIND_DATAA pfd;
+                HANDLE hPresets = FindFirstFileA(presetPattern, &pfd);
+                if (hPresets != INVALID_HANDLE_VALUE)
+                {
+                    do {
+                        if (fPresetCount >= kMaxPresets) break;
+                        char* dot = std::strrchr(pfd.cFileName, '.');
+                        if (dot) *dot = '\0';
+                        std::strncpy(fPresetNames[fPresetCount], pfd.cFileName, 63);
+                        fPresetNames[fPresetCount][63] = '\0';
+                        std::strncpy(fPresetFolders[fPresetCount], fd.cFileName, 63);
+                        fPresetFolders[fPresetCount][63] = '\0';
+                        fPresetCount++;
+                    } while (FindNextFileA(hPresets, &pfd));
+                    FindClose(hPresets);
+                }
+
+                fFolderCount[fNumFolders] = fPresetCount - fFolderStart[fNumFolders];
+                if (fFolderCount[fNumFolders] > 0)
+                    fNumFolders++;
+
+            } while (FindNextFileA(hFind, &fd));
+            FindClose(hFind);
+        }
+
+        // Also scan root-level presets (no folder)
+        char rootPattern[512];
+        std::snprintf(rootPattern, sizeof(rootPattern), "%s\\*.octopreset", dir);
+        HANDLE hRoot = FindFirstFileA(rootPattern, &fd);
+        if (hRoot != INVALID_HANDLE_VALUE)
+        {
+            if (fPresetCount > 0 || true) // always add root as a "folder" if it has presets
+            {
+                int rootStart = fPresetCount;
+                do {
+                    if (fPresetCount >= kMaxPresets) break;
+                    char* dot = std::strrchr(fd.cFileName, '.');
+                    if (dot) *dot = '\0';
+                    std::strncpy(fPresetNames[fPresetCount], fd.cFileName, 63);
+                    fPresetNames[fPresetCount][63] = '\0';
+                    fPresetFolders[fPresetCount][0] = '\0'; // no folder
+                    fPresetCount++;
+                } while (FindNextFileA(hRoot, &fd));
+                FindClose(hRoot);
+
+                int rootCount = fPresetCount - rootStart;
+                if (rootCount > 0 && fNumFolders < kMaxFolders)
+                {
+                    std::strncpy(fFolderNames[fNumFolders], "Unsorted", 63);
+                    fFolderStart[fNumFolders] = rootStart;
+                    fFolderCount[fNumFolders] = rootCount;
+                    fNumFolders++;
+                }
+            }
+        }
+        #else
+        DIR* d = opendir(dir);
+        if (!d) return;
+        struct dirent* ent;
+
+        // Scan subfolders
+        while ((ent = readdir(d)) != nullptr)
+        {
+            if (ent->d_name[0] == '.') continue;
+            if (ent->d_type != DT_DIR) continue;
+            if (fNumFolders >= kMaxFolders) break;
+
+            std::strncpy(fFolderNames[fNumFolders], ent->d_name, 63);
+            fFolderNames[fNumFolders][63] = '\0';
+            fFolderStart[fNumFolders] = fPresetCount;
+
+            char subdir[512];
+            std::snprintf(subdir, sizeof(subdir), "%s/%s", dir, ent->d_name);
+            DIR* sd = opendir(subdir);
+            if (sd)
+            {
+                struct dirent* sent;
+                while ((sent = readdir(sd)) != nullptr)
+                {
+                    if (fPresetCount >= kMaxPresets) break;
+                    const char* ext = std::strrchr(sent->d_name, '.');
+                    if (!ext || std::strcmp(ext, ".octopreset") != 0) continue;
+
+                    size_t nameLen = static_cast<size_t>(ext - sent->d_name);
+                    if (nameLen > 63) nameLen = 63;
+                    std::memcpy(fPresetNames[fPresetCount], sent->d_name, nameLen);
+                    fPresetNames[fPresetCount][nameLen] = '\0';
+                    std::strncpy(fPresetFolders[fPresetCount], ent->d_name, 63);
+                    fPresetFolders[fPresetCount][63] = '\0';
+                    fPresetCount++;
+                }
+                closedir(sd);
+            }
+
+            fFolderCount[fNumFolders] = fPresetCount - fFolderStart[fNumFolders];
+            if (fFolderCount[fNumFolders] > 0)
+                fNumFolders++;
+        }
+        closedir(d);
+
+        // Scan root-level presets
+        d = opendir(dir);
+        if (d)
+        {
+            int rootStart = fPresetCount;
+            while ((ent = readdir(d)) != nullptr)
+            {
+                if (fPresetCount >= kMaxPresets) break;
+                if (ent->d_type == DT_DIR) continue;
+                const char* ext = std::strrchr(ent->d_name, '.');
+                if (!ext || std::strcmp(ext, ".octopreset") != 0) continue;
+
+                size_t nameLen = static_cast<size_t>(ext - ent->d_name);
+                if (nameLen > 63) nameLen = 63;
+                std::memcpy(fPresetNames[fPresetCount], ent->d_name, nameLen);
+                fPresetNames[fPresetCount][nameLen] = '\0';
+                fPresetFolders[fPresetCount][0] = '\0';
+                fPresetCount++;
+            }
+            closedir(d);
+
+            int rootCount = fPresetCount - rootStart;
+            if (rootCount > 0 && fNumFolders < kMaxFolders)
+            {
+                std::strncpy(fFolderNames[fNumFolders], "Unsorted", 63);
+                fFolderStart[fNumFolders] = rootStart;
+                fFolderCount[fNumFolders] = rootCount;
+                fNumFolders++;
+            }
+        }
+        #endif
+    }
+
+    void getPresetDir(char* out, size_t len)
+    {
+        #ifdef _WIN32
+        const char* appdata = std::getenv("APPDATA");
+        if (appdata)
+            std::snprintf(out, len, "%s\\Octofilter\\Presets", appdata);
+        else
+            std::snprintf(out, len, "C:\\Octofilter\\Presets");
+        #else
+        const char* home = std::getenv("HOME");
+        if (home)
+            std::snprintf(out, len, "%s/Library/Application Support/Octofilter/Presets", home);
+        else
+            std::snprintf(out, len, "/tmp/Octofilter/Presets");
+        #endif
+    }
+
+    void getPresetPath(const char* name, char* out, size_t len)
+    {
+        char dir[512];
+        getPresetDir(dir, sizeof(dir));
+        // If preset has a folder, include it in the path
+        if (fCurrentPresetIdx >= 0 && fCurrentPresetIdx < fPresetCount &&
+            fPresetFolders[fCurrentPresetIdx][0] != '\0')
+        {
+            #ifdef _WIN32
+            std::snprintf(out, len, "%s\\%s\\%s.octopreset", dir, fPresetFolders[fCurrentPresetIdx], name);
+            #else
+            std::snprintf(out, len, "%s/%s/%s.octopreset", dir, fPresetFolders[fCurrentPresetIdx], name);
+            #endif
+        }
+        else
+        {
+            #ifdef _WIN32
+            std::snprintf(out, len, "%s\\%s.octopreset", dir, name);
+            #else
+            std::snprintf(out, len, "%s/%s.octopreset", dir, name);
+            #endif
+        }
+    }
+
+    void getPresetPathInFolder(const char* folder, const char* name, char* out, size_t len)
+    {
+        char dir[512];
+        getPresetDir(dir, sizeof(dir));
+        #ifdef _WIN32
+        std::snprintf(out, len, "%s\\%s\\%s.octopreset", dir, folder, name);
+        #else
+        std::snprintf(out, len, "%s/%s/%s.octopreset", dir, folder, name);
+        #endif
+    }
+
+    void clampPointsToTexture()
+    {
+        // Display-only clamp: the DSP applies texture clamping internally.
+        // This just syncs the per-point knob display if a point is selected.
+        if (fSelectedPoint >= 0) syncPerPointKnobs();
+    }
+
     void doUIRandomise()
     {
-        // Simple LCG random helpers — use upper bits for better distribution
+        // Reseed with time for better entropy on repeated clicks
         fRngState = fRngState * 1103515245u + 12345u;
+        fRngState ^= static_cast<uint32_t>(getWidth() * getHeight() + fPointCount * 7919u);
+        fRngState = fRngState * 6364136223846793005u + 1442695040888963407u; // better LCG
         auto rndFloat = [&](float mn, float mx) -> float {
-            fRngState = fRngState * 1103515245u + 12345u;
-            const float t = static_cast<float>((fRngState >> 8) & 0xFFFF) / 65535.0f;
+            fRngState = fRngState * 6364136223846793005u + 1442695040888963407u;
+            const float t = static_cast<float>((fRngState >> 12) & 0xFFFFF) / 1048575.0f;
             return mn + t * (mx - mn);
         };
         auto rndInt = [&](int mn, int mx) -> int {
-            fRngState = fRngState * 1103515245u + 12345u;
+            fRngState = fRngState * 6364136223846793005u + 1442695040888963407u;
             return mn + static_cast<int>((fRngState >> 16) % static_cast<uint32_t>(mx - mn + 1));
         };
 
@@ -1049,27 +2088,29 @@ private:
 
     void doRandomisePointOnly()
     {
-        if (fSelectedPoint < 0) return;
-        fRngState = fRngState * 1103515245u + 12345u;
+        // Randomise ALL points (not just the selected one)
+        fRngState = fRngState * 6364136223846793005u + 1442695040888963407u;
+        fRngState ^= static_cast<uint32_t>(fPointCount * 104729u);
         auto rndFloat = [&](float mn, float mx) -> float {
-            fRngState = fRngState * 1103515245u + 12345u;
-            const float t = static_cast<float>((fRngState >> 8) & 0xFFFF) / 65535.0f;
+            fRngState = fRngState * 6364136223846793005u + 1442695040888963407u;
+            const float t = static_cast<float>((fRngState >> 12) & 0xFFFFF) / 1048575.0f;
             return mn + t * (mx - mn);
         };
         auto rndInt = [&](int mn, int mx) -> int {
-            fRngState = fRngState * 1103515245u + 12345u;
+            fRngState = fRngState * 6364136223846793005u + 1442695040888963407u;
             return mn + static_cast<int>((fRngState >> 16) % static_cast<uint32_t>(mx - mn + 1));
         };
-        doRandomisePoint(fSelectedPoint, rndFloat, rndInt);
-        syncPerPointKnobs();
+        for (int i = 0; i < 8; ++i)
+            doRandomisePoint(i, rndFloat, rndInt);
+        if (fSelectedPoint >= 0) syncPerPointKnobs();
     }
 
     void doRandomiseGlobalsOnly()
     {
-        fRngState = fRngState * 1103515245u + 12345u;
+        fRngState = fRngState * 6364136223846793005u + 1442695040888963407u;
         auto rndFloat = [&](float mn, float mx) -> float {
-            fRngState = fRngState * 1103515245u + 12345u;
-            const float t = static_cast<float>((fRngState >> 8) & 0xFFFF) / 65535.0f;
+            fRngState = fRngState * 6364136223846793005u + 1442695040888963407u;
+            const float t = static_cast<float>((fRngState >> 12) & 0xFFFFF) / 1048575.0f;
             return mn + t * (mx - mn);
         };
         doRandomiseGlobals(rndFloat);
@@ -1082,21 +2123,29 @@ private:
         setParameterValue(kGlobalTexture, fTexture);
         fGlobalKnobs[0].value = fTexture;
 
-        fResonance = rndFloat(0.3f, 8.0f);
-        setParameterValue(kGlobalResonance, fResonance);
-        fGlobalKnobs[1].value = fResonance;
-
-        fFeedback = rndFloat(0.1f, 0.8f);
+        fFeedback = rndFloat(0.3f, 0.9f);
         setParameterValue(kGlobalFeedback, fFeedback);
-        fGlobalKnobs[2].value = fFeedback;
+        fGlobalKnobs[1].value = fFeedback;
 
-        fPitchShift = rndFloat(-12.0f, 12.0f);
+        fPitchShift = rndFloat(-7.0f, 7.0f);
         setParameterValue(kGlobalPitchShift, fPitchShift);
-        fGlobalKnobs[3].value = fPitchShift;
+        fGlobalKnobs[2].value = fPitchShift;
 
-        fGlideTime = rndFloat(50.0f, 800.0f);
-        setParameterValue(kGlobalGlideTime, fGlideTime);
-        fGlobalKnobs[7].value = fGlideTime;
+        fWetDry = rndFloat(0.6f, 1.0f);
+        setParameterValue(kGlobalWetDry, fWetDry);
+        fGlobalKnobs[3].value = fWetDry;
+
+        fInputGain = 0.0f;  // keep input gain neutral
+        setParameterValue(kGlobalInputGain, fInputGain);
+        fGlobalKnobs[4].value = fInputGain;
+
+        fOutputGain = 0.0f; // keep output gain neutral
+        setParameterValue(kGlobalOutputGain, fOutputGain);
+        fGlobalKnobs[5].value = fOutputGain;
+
+        fStereoCollapse = rndFloat(0.4f, 1.0f);
+        setParameterValue(kGlobalStereoCollapse, fStereoCollapse);
+        fGlobalKnobs[6].value = fStereoCollapse;
     }
 
     template<typename RndF, typename RndI>
@@ -1112,34 +2161,41 @@ private:
             setParameterValue(ppIdx(i, kPPCutoffOffset), offset);
         }
 
-        const float ft = static_cast<float>(rndInt(0, 3));
+        const float ft = static_cast<float>(rndInt(0, 2));
         fPointFilterType[i] = ft;
         setParameterValue(ppIdx(i, kPPFilterType), ft);
 
-        const float fb = rndFloat(0.0f, 0.7f);
+        const float fb = rndFloat(0.4f, 0.9f);
         fPointFeedback[i] = fb;
         setParameterValue(ppIdx(i, kPPFeedback), fb);
 
-        const float ps = rndFloat(-12.0f, 12.0f);
+        const float ps = rndFloat(-7.0f, 7.0f);
         fPointPitchShift[i] = ps;
         setParameterValue(ppIdx(i, kPPPitchShift), ps);
 
         const float pan = rndFloat(-1.0f, 1.0f);
         fPointPan[i] = pan;
         setParameterValue(ppIdx(i, kPPPan), pan);
+
+        const float q = rndFloat(2.5f, 12.0f);
+        fPointQ[i] = q;
+        setParameterValue(ppIdx(i, kPPQ), q);
+
+        const float lv = rndFloat(0.5f, 1.5f);
+        fPointLevel[i] = lv;
+        setParameterValue(ppIdx(i, kPPLevel), lv);
     }
 
     void syncKnobToState(const Knob& k)
     {
         // Update mirrored state when a knob changes
-        if (k.paramIndex == kGlobalTexture)    fTexture = k.value;
-        if (k.paramIndex == kGlobalResonance)  fResonance = k.value;
+        if (k.paramIndex == kGlobalTexture)    { fTexture = k.value; clampPointsToTexture(); }
         if (k.paramIndex == kGlobalFeedback)   fFeedback = k.value;
         if (k.paramIndex == kGlobalPitchShift) fPitchShift = k.value;
         if (k.paramIndex == kGlobalWetDry)     fWetDry = k.value;
         if (k.paramIndex == kGlobalInputGain)  fInputGain = k.value;
         if (k.paramIndex == kGlobalOutputGain) fOutputGain = k.value;
-        if (k.paramIndex == kGlobalGlideTime)  fGlideTime = k.value;
+        if (k.paramIndex == kGlobalStereoCollapse) fStereoCollapse = k.value;
 
         // Per-point
         if (fSelectedPoint >= 0 && fSelectedPoint < 8)
@@ -1200,8 +2256,38 @@ private:
     // Global params mirrored
     float fTexture{0.5f}, fResonance{0.707f}, fFeedback{0.3f};
     float fPitchShift{0}, fWetDry{1}, fInputGain{0}, fOutputGain{0};
-    float fHarmonicMode{0}, fGlideTime{200};
-    float fWavePhase{0}; // animation counter for waveform display
+    float fHarmonicMode{0};
+    float fStereoCollapse{1.0f};
+
+    // Menu state
+    bool  fMenuOpen { false };
+    bool  fPresetsOpen { false };
+    int   fMenuTab  { 0 };  // 0=Settings, 1=Info
+    float fMenuBtnX{0}, fMenuBtnY{0}, fMenuBtnW{0}, fMenuBtnH{0};
+    float fPresetsBtnX{0}, fPresetsBtnY{0}, fPresetsBtnW{0}, fPresetsBtnH{0};
+    float fPresetSaveBtnX{0}, fPresetSaveBtnY{0}, fPresetSaveBtnW{0}, fPresetSaveBtnH{0};
+
+    // Preset strip (top bar)
+    float fPresetStripX{0}, fPresetStripY{0}, fPresetStripW{0}, fPresetStripH{0};
+    float fPresetArrowW{0}, fPresetNameW{0};
+    int   fCurrentPresetIdx { -1 };
+
+    // Preset file list (with folder info)
+    static constexpr int kMaxPresets = 64;
+    static constexpr int kMaxFolders = 16;
+    char  fPresetNames[kMaxPresets][64] {};
+    char  fPresetFolders[kMaxPresets][64] {};  // which folder each preset belongs to
+    char  fFolderNames[kMaxFolders][64] {};
+    int   fFolderStart[kMaxFolders] {};         // index into presets where folder starts
+    int   fFolderCount[kMaxFolders] {};         // number of presets in folder
+    int   fPresetCount { 0 };
+    int   fNumFolders  { 0 };
+
+    // Preset naming input
+    bool  fNamingPreset { false };
+    char  fPresetNameInput[64] {};
+    int   fPresetNameLen { 0 };
+    int   fPresetHoverIdx { -1 };  // which preset row the mouse is over
 
     // Per-point params mirrored
     float fPointFilterType[8]{};
