@@ -134,7 +134,7 @@ public:
             fPointFeedback[i]   = 0.0f;
             fPointPitchShift[i] = 0.0f;
             fPointQ[i]          = 0.0f;
-            fPointCutoffZone[i] = 1; // default to top zone
+            fPointCutoffOffset[i] = 0.5f; // 0..1 vertical position, middle default
         }
     }
 
@@ -401,13 +401,7 @@ protected:
         strokeWidth(1.0f);
         stroke();
 
-        // Centre line horizontal (cutoff midpoint)
-        beginPath();
-        moveTo(x + 4.0f, y + h * 0.5f);
-        lineTo(x + w - 4.0f, y + h * 0.5f);
-        strokeColor(Color(1.0f, 1.0f, 1.0f, 0.25f));
-        strokeWidth(1.0f);
-        stroke();
+        // (No centre line — cutoff now maps bottom=low to top=high)
 
         // Stereo width boundary — shows the horizontal extent
         // Width = fStereoCollapse (0=mono, 1=full)
@@ -425,36 +419,46 @@ protected:
             stroke();
         }
 
-        // Texture boundary — shows the vertical collapse area
-        // Texture scales the vertical spread of points
-        const float vertExtent = fTexture;
-        const float vBoxY = y + (1.0f - vertExtent) * 0.5f * h;
-        const float vBoxH = h * vertExtent;
-
-        if (fTexture < 0.99f && vBoxH > 2.0f)
+        // Texture ceiling — the maximum height points can reach.
+        // Texture drags points down: at texture=1 the ceiling is at the top,
+        // at texture=0 it's at the bottom (all points collapse to low cutoff).
+        const float ceilingY = y + h - fTexture * h;
+        if (fTexture < 0.99f)
         {
+            // Dashed ceiling line
             beginPath();
-            roundedRect(x, vBoxY, w, vBoxH, 3.0f);
+            moveTo(x + 4.0f, ceilingY);
+            lineTo(x + w - 4.0f, ceilingY);
             strokeColor(Color(Palette::accent.red, Palette::accent.green,
-                              Palette::accent.blue, 0.4f));
+                              Palette::accent.blue, 0.5f));
             strokeWidth(1.5f);
             stroke();
+
+            // Shade the area above the ceiling (unreachable)
+            beginPath();
+            rect(x, y, w, ceilingY - y);
+            fillColor(Color(0.0f, 0.0f, 0.0f, 0.25f));
+            fill();
         }
 
         // Draw point nodes
         for (int i = 0; i < fPointCount; ++i)
         {
-            // Display: pan collapses with StereoCollapse, cutoff offset shown directly
+            // Pan collapses horizontally with StereoCollapse (Width)
             float effPan = fPointPan[i] * fStereoCollapse;
 
-            // Scale offset display by Texture: at texture=0 all points collapse to centre,
-            // at texture=1 full vertical spread is shown
-            float effOffset = fPointCutoffOffset[i] * fTexture;
+            // Cutoff: position (0..1) is the vertical height. bottom=low, top=high.
+            // Texture is a ceiling that pushes points DOWN — the node is drawn at
+            // min(position, texture) so it visually sits at or below the ceiling,
+            // matching what the DSP does. The stored position is remembered, so
+            // raising Texture lets the point return to its previous height.
+            float position = fPointCutoffOffset[i];
+            if (position < 0.0f) position = 0.0f;
+            if (position > 1.0f) position = 1.0f;
+            const float effPosition = (position < fTexture) ? position : fTexture;
 
             const float px = x + (effPan + 1.0f) * 0.5f * w;
-            const float cutoffNorm = effOffset / 24.0f;
-            const float scaledY = 0.5f + cutoffNorm * 0.5f;
-            const float py = y + h - scaledY * h;
+            const float py = y + h - effPosition * h; // bottom of field = low cutoff
 
             // Size = global feedback × per-point feedback
             const float effectiveFB = fFeedback * fPointFeedback[i];
@@ -463,6 +467,25 @@ protected:
 
             const int ftype = static_cast<int>(fPointFilterType[i] + 0.5f) % 4;
             Color nodeColor = Palette::filterColor(ftype);
+
+            // Ghost marker: if Texture is holding this point below its stored
+            // position, show a faint outline where it will return to.
+            if (position > fTexture + 0.01f)
+            {
+                const float ghostY = y + h - position * h;
+                beginPath();
+                circle(px, ghostY, fbSize);
+                strokeColor(Color(nodeColor.red, nodeColor.green, nodeColor.blue, 0.25f));
+                strokeWidth(1.0f);
+                stroke();
+                // Connector line from ghost down to the actual node
+                beginPath();
+                moveTo(px, ghostY);
+                lineTo(px, py);
+                strokeColor(Color(1.0f, 1.0f, 1.0f, 0.12f));
+                strokeWidth(1.0f);
+                stroke();
+            }
 
             // Selection ring (all selected get ring, primary gets thicker)
             if (fPointSelected[i])
@@ -1004,7 +1027,11 @@ protected:
         const float startAngle = 0.75f * 3.14159f;  // 135° = 7 o'clock
         const float endAngle   = 2.25f * 3.14159f;  // 405° = 5 o'clock
         const float range      = endAngle - startAngle;
-        const float normalized = (k.max > k.min) ? (k.value - k.min) / (k.max - k.min) : 0.0f;
+        float normalized = (k.max > k.min) ? (k.value - k.min) / (k.max - k.min) : 0.0f;
+        // Clamp so extreme values never produce an out-of-range angle that
+        // renders as a vanished or wrapped arc.
+        if (normalized < 0.0f) normalized = 0.0f;
+        if (normalized > 1.0f) normalized = 1.0f;
         const float valueAngle = startAngle + normalized * range;
 
         // Is this a bipolar parameter? (min is negative, max is positive, zero is centre)
@@ -1021,8 +1048,11 @@ protected:
         // Value arc
         if (bipolar)
         {
-            // Draw from centre to current value
-            if (normalized > 0.001f || normalized < -0.001f)
+            // Draw from centre to current value. The arc should be visible for
+            // any position away from the centre — including the far-left extreme.
+            // (Bug fix: previously keyed off normalized vs 0, which hid the arc
+            //  at far-left where normalized==0.)
+            if (std::fabs(valueAngle - centreAngle) > 0.001f)
             {
                 const float fromAngle = (valueAngle < centreAngle) ? valueAngle : centreAngle;
                 const float toAngle   = (valueAngle < centreAngle) ? centreAngle : valueAngle;
@@ -1050,6 +1080,16 @@ protected:
         beginPath();
         circle(k.x, k.y, 3.5f);
         fillColor(Palette::text);
+        fill();
+
+        // Position indicator dot on the rim (always visible, even at extremes).
+        // This ensures the knob never looks "broken/vanished" at far left/right.
+        const float indA = valueAngle;
+        const float indX = k.x + std::cos(indA) * k.radius;
+        const float indY = k.y + std::sin(indA) * k.radius;
+        beginPath();
+        circle(indX, indY, 2.5f);
+        fillColor(k.dragging ? Palette::highlight : Palette::accentLight);
         fill();
 
         // Label
@@ -1397,13 +1437,16 @@ protected:
                         fSelectedPoint = i;
                     }
                     fDraggingPoint = true;
-                    // Store starting positions for relative drag
+                    // Store starting positions for relative drag.
+                    // Use the VISIBLE (ceiling-clamped) cutoff position so that
+                    // grabbing a point held down by Texture tracks immediately.
                     fDragStartMX = mx;
                     fDragStartMY = my;
                     for (int j = 0; j < 8; ++j)
                     {
                         fDragStartPan[j] = fPointPan[j];
-                        fDragStartOffset[j] = fPointCutoffOffset[j];
+                        const float storedPos = fPointCutoffOffset[j];
+                        fDragStartOffset[j] = (storedPos < fTexture) ? storedPos : fTexture;
                     }
                     syncPerPointKnobs();
                     repaint();
@@ -1484,16 +1527,8 @@ protected:
             if (newVal > k.max) newVal = k.max;
             k.value = newVal;
 
-            // For cutoff knob: send signed value using remembered zone direction
-            if (fSelectedPoint >= 0 && k.paramIndex == ppIdx(fSelectedPoint, kPPCutoffOffset))
-            {
-                const float sign = (fPointCutoffZone[fSelectedPoint] >= 0) ? 1.0f : -1.0f;
-                setParameterValue(k.paramIndex, newVal * sign);
-            }
-            else
-            {
-                setParameterValue(k.paramIndex, newVal);
-            }
+            // Cutoff knob is now a direct 0..1 value (no sign/zone)
+            setParameterValue(k.paramIndex, newVal);
 
             syncKnobToState(k);
             repaint();
@@ -1505,10 +1540,10 @@ protected:
         {
             // Calculate delta in normalised space
             const float deltaPan = (mx - fDragStartMX) / fFieldW * 2.0f;
-            const float deltaOffset = -(my - fDragStartMY) / fFieldH * 48.0f;
+            // Cutoff position 0..1: dragging up increases (higher cutoff).
+            // Maps directly to field height (1:1 with the pointer).
+            const float deltaPos = -(my - fDragStartMY) / fFieldH;
 
-            // Send FULL-RANGE values — DSP applies texture scaling internally.
-            // Clamp only to parameter bounds (not texture bounds).
             for (int i = 0; i < fPointCount; ++i)
             {
                 if (!fPointSelected[i]) continue;
@@ -1519,13 +1554,11 @@ protected:
                 fPointPan[i] = newPan;
                 setParameterValue(ppIdx(i, kPPPan), newPan);
 
-                float newOffset = fDragStartOffset[i] + deltaOffset;
-                if (newOffset < -24.0f) newOffset = -24.0f;
-                if (newOffset >  24.0f) newOffset =  24.0f;
-                fPointCutoffOffset[i] = newOffset;
-                if (newOffset > 0.0f)       fPointCutoffZone[i] =  1;
-                else if (newOffset < 0.0f)  fPointCutoffZone[i] = -1;
-                setParameterValue(ppIdx(i, kPPCutoffOffset), newOffset);
+                float newPos = fDragStartOffset[i] + deltaPos;
+                if (newPos < 0.0f) newPos = 0.0f;
+                if (newPos > 1.0f) newPos = 1.0f;
+                fPointCutoffOffset[i] = newPos;
+                setParameterValue(ppIdx(i, kPPCutoffOffset), newPos);
             }
 
             syncPerPointKnobs();
@@ -1661,7 +1694,7 @@ private:
         set(3, 0.0f, 2.0f, 1.0f,   "Level",  0);
         set(4, 0.0f, 1.1f, 0.0f,   "FB",     0);
         set(5, -24.f, 24.f, 0.0f,  "Pitch",  0);
-        set(6, 0.0f, 24.f, 0.0f,  "Cutoff", 0);  // magnitude only (0=centre, 24=edge)
+        set(6, 0.0f, 1.0f, 0.5f,  "Cutoff", 0);  // 0=low (bottom), 1=high (top)
     }
 
     void syncPerPointKnobs()
@@ -1674,7 +1707,7 @@ private:
         fPPKnobs[3].value = fPointLevel[p];         fPPKnobs[3].paramIndex = ppIdx(p, kPPLevel);
         fPPKnobs[4].value = fPointFeedback[p];      fPPKnobs[4].paramIndex = ppIdx(p, kPPFeedback);
         fPPKnobs[5].value = fPointPitchShift[p];    fPPKnobs[5].paramIndex = ppIdx(p, kPPPitchShift);
-        fPPKnobs[6].value = std::fabs(fPointCutoffOffset[p]);  fPPKnobs[6].paramIndex = ppIdx(p, kPPCutoffOffset);
+        fPPKnobs[6].value = fPointCutoffOffset[p];  fPPKnobs[6].paramIndex = ppIdx(p, kPPCutoffOffset);
     }
 
     void updateGlobalKnob(int idx, float value)
@@ -2151,15 +2184,11 @@ private:
     template<typename RndF, typename RndI>
     void doRandomisePoint(int i, RndF& rndFloat, RndI& rndInt)
     {
-        const bool harmonic = (fHarmonicMode > 0.5f);
-
-        if (!harmonic)
-        {
-            const float offset = rndFloat(-24.0f, 24.0f);
-            fPointCutoffOffset[i] = offset;
-            fPointCutoffZone[i] = (offset >= 0.0f) ? 1 : -1;
-            setParameterValue(ppIdx(i, kPPCutoffOffset), offset);
-        }
+        // Cutoff is randomised in both modes — Harmonic mode quantises the
+        // resulting frequency rather than replacing the per-point cutoff.
+        const float pos = rndFloat(0.2f, 1.0f); // cutoff position 0..1
+        fPointCutoffOffset[i] = pos;
+        setParameterValue(ppIdx(i, kPPCutoffOffset), pos);
 
         const float ft = static_cast<float>(rndInt(0, 2));
         fPointFilterType[i] = ft;
@@ -2207,12 +2236,7 @@ private:
             if (k.paramIndex == ppIdx(p, kPPLevel))        fPointLevel[p] = k.value;
             if (k.paramIndex == ppIdx(p, kPPFeedback))     fPointFeedback[p] = k.value;
             if (k.paramIndex == ppIdx(p, kPPPitchShift))   fPointPitchShift[p] = k.value;
-            if (k.paramIndex == ppIdx(p, kPPCutoffOffset))
-            {
-                // Knob shows magnitude; use stored zone for sign
-                const float sign = (fPointCutoffZone[p] >= 0) ? 1.0f : -1.0f;
-                fPointCutoffOffset[p] = k.value * sign;
-            }
+            if (k.paramIndex == ppIdx(p, kPPCutoffOffset)) fPointCutoffOffset[p] = k.value;
         }
     }
 

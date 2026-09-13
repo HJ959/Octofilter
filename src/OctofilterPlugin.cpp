@@ -64,7 +64,7 @@ OctofilterPlugin::OctofilterPlugin()
     for (int i = 0; i < 8; ++i)
     {
         mPointFilterType[i]   = 0.0f;  // LP
-        mPointCutoffOffset[i] = 0.0f;
+        mPointCutoffOffset[i] = 0.5f;  // 0..1 vertical position (0.5 = middle)
         mPointQ[i]            = 5.0f;
         mPointLevel[i]        = 1.0f;
         mPointFeedback[i]     = 0.7f;
@@ -241,10 +241,10 @@ void OctofilterPlugin::initParameter(uint32_t index, Parameter& p)
             p.hints = kParameterIsAutomatable | kParameterIsInteger;
             break;
         case kPPCutoffOffset:
-            std::snprintf(name, sizeof(name), "P%d Cutoff Offset", point + 1);
-            std::snprintf(sym,  sizeof(sym),  "p%d_cutoff_offset", point + 1);
-            p.name = name; p.symbol = sym; p.unit = "st";
-            p.ranges.min = -24.0f; p.ranges.max = 24.0f; p.ranges.def = 0.0f;
+            std::snprintf(name, sizeof(name), "P%d Cutoff", point + 1);
+            std::snprintf(sym,  sizeof(sym),  "p%d_cutoff", point + 1);
+            p.name = name; p.symbol = sym;
+            p.ranges.min = 0.0f; p.ranges.max = 1.0f; p.ranges.def = 0.5f;
             p.hints = kParameterIsAutomatable;
             break;
         case kPPQ:
@@ -542,23 +542,19 @@ void OctofilterPlugin::doRandomise() noexcept
 {
     std::mt19937_64 rng(++mRngSeed);
 
-    std::uniform_real_distribution<float> offsetDist(-24.0f, 24.0f);
+    std::uniform_real_distribution<float> offsetDist(0.2f, 1.0f); // cutoff position 0..1
     std::uniform_int_distribution<int>    typeDist(0, 3);
     std::uniform_real_distribution<float> pitchDist(-7.0f, 7.0f);
     std::uniform_real_distribution<float> feedDist(0.4f, 0.9f);
 
-    const bool harmonic = (mHarmonicMode > 0.5f);
-
     for (int i = 0; i < 8; ++i)
     {
-        // In harmonic mode: don't randomise cutoff offsets (harmonics own them)
-        if (!harmonic)
-        {
-            mPointCutoffOffset[i] = offsetDist(rng);
-            mPoints[i].cutoffOffsetSemitones = mPointCutoffOffset[i];
-            requestParameterValueChange(
-                kNumGlobalParams + i * kNumPerPointParams + 1, mPointCutoffOffset[i]);
-        }
+        // Cutoff is randomised in both modes — Harmonic mode quantises the
+        // resulting frequency rather than replacing the per-point cutoff.
+        mPointCutoffOffset[i] = offsetDist(rng);
+        mPoints[i].cutoffOffsetSemitones = mPointCutoffOffset[i];
+        requestParameterValueChange(
+            kNumGlobalParams + i * kNumPerPointParams + 1, mPointCutoffOffset[i]);
 
         mPointFilterType[i]   = static_cast<float>(typeDist(rng));
         mPointPitchShift[i]   = pitchDist(rng);
@@ -680,6 +676,19 @@ void OctofilterPlugin::run(const float** inputs, float** outputs, uint32_t frame
 
         // Apply global pitch shift as offset on top of per-point pitch
         mPoints[i].setPitchShift(totalPitch);
+
+        // Resonance-aware feedback compensation: a high-Q filter has high gain
+        // at its resonant peak. When that peak is inside the feedback loop it can
+        // self-reinforce into a piercing squeal, especially combined with pitch
+        // shifting. Scale the feedback down as Q rises to keep loop gain in check.
+        // Q 2.5 → comp 1.0 (no change); Q 20 → comp ~0.5.
+        const float qNorm = (q - 2.5f) / 17.5f; // 0..1 across the Q range
+        float comp = 1.0f - qNorm * 0.5f;
+        // Extra reduction when pitch shift is active (pitch in the loop is the
+        // main squeal trigger). Up to a further 30% reduction at max pitch.
+        comp *= 1.0f - pitchDanger * 0.3f;
+        if (comp < 0.3f) comp = 0.3f;
+        mPointFbComp[i] = comp;
     }
 
     // All globals smoothed per-block for zipper-free automation
@@ -737,8 +746,8 @@ void OctofilterPlugin::run(const float** inputs, float** outputs, uint32_t frame
         {
             Octofilter::PointState& pt = mPoints[p];
 
-            // Feedback: per-point × global (headroom applied once via global)
-            const float fbAmt = pt.feedbackAmount * smoothFeedback;
+            // Feedback: per-point × global × resonance compensation
+            const float fbAmt = pt.feedbackAmount * smoothFeedback * mPointFbComp[p];
 
             // Input + input gain + feedback mix
             const float dryIn =
@@ -764,9 +773,12 @@ void OctofilterPlugin::run(const float** inputs, float** outputs, uint32_t frame
         wetL *= norm;
         wetR *= norm;
 
-        // Wet/dry + output gain
-        const float dryL = inputs[0][f];
-        const float dryR = (numInputs > 1) ? inputs[1][f] : inputs[0][f];
+        // Wet/dry + output gain.
+        // Input gain sits at the FRONT of the chain: it's already applied to the
+        // wet path (into the filters) and here we apply it to the dry path too,
+        // so the Input knob controls the level of the whole signal.
+        const float dryL = inputs[0][f] * smoothInGain;
+        const float dryR = (numInputs > 1) ? inputs[1][f] * smoothInGain : dryL;
 
         // Advance wet/dry smoother per-sample for click-free crossfade
         mSmWetDry.setTarget(mWetDry);
@@ -800,30 +812,38 @@ void OctofilterPlugin::updateFilterParams() noexcept
 {
     const bool harmonic = (mHarmonicMode > 0.5f);
 
-    // Texture = centre frequency control (log scale):
-    //   0 = 20 Hz (dark, everything filtered)
-    //   1 = 20 kHz (bright, fully open)
-    // Per-point offsets spread above/below in semitones.
-    const float centreFreq = 20.0f * std::pow(1000.0f, mTexture); // 20 Hz – 20 kHz log
+    // Cutoff model — both controls always active:
+    //   • Per-point position (0..1) sets THAT point's cutoff
+    //     (0 = bottom = 20 Hz / dark, 1 = top = 20 kHz / open)
+    //   • Texture is a global THRESHOLD (ceiling) across all points:
+    //       effectivePosition = min(position, texture)
+    //     Lowering Texture pushes points down; raising it lets them return to
+    //     their stored position.
+    //   • Harmonic mode does NOT replace the per-point cutoff — it quantises
+    //     each point's resulting frequency to the natural harmonic series.
+    const float texture = mTexture;
+    static constexpr float kHarmonicFundamental = 55.0f; // A1 reference
 
     for (int i = 0; i < mActivePoints; ++i)
     {
         Octofilter::PointState& pt = mPoints[i];
         const float q = (mPointQ[i] >= 2.5f) ? mPointQ[i] : 2.5f;
 
-        float cutoff;
+        // Per-point position, clamped by the Texture ceiling
+        float position = pt.cutoffOffsetSemitones; // 0..1 stored position
+        if (position < 0.0f) position = 0.0f;
+        if (position > 1.0f) position = 1.0f;
+        const float effPosition = (position < texture) ? position : texture;
+
+        float cutoff = 20.0f * std::pow(1000.0f, effPosition);
+
         if (harmonic)
         {
-            // Harmonic mode: Texture sets the fundamental, harmonics multiply above it.
-            cutoff = Octofilter::HarmonicMapper::targetCutoff(
-                centreFreq, i, mActivePoints, mTexture);
-        }
-        else
-        {
-            // Random mode: centre frequency + per-point semitone offset.
-            // Each point spreads above or below the centre, giving a rich
-            // spectral field. Offset ±24 semitones = ±2 octaves from centre.
-            cutoff = centreFreq * std::pow(2.0f, pt.cutoffOffsetSemitones / 12.0f);
+            // Snap to the nearest harmonic of the fundamental (n × 55 Hz).
+            // Keeps per-point control while giving the harmonic-series character.
+            float harmonicNum = std::round(cutoff / kHarmonicFundamental);
+            if (harmonicNum < 1.0f) harmonicNum = 1.0f;
+            cutoff = harmonicNum * kHarmonicFundamental;
         }
 
         // Clamp to safe range

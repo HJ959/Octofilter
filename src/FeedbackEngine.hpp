@@ -46,7 +46,11 @@ public:
     /** Call from activate() / sampleRateChanged(). No heap allocs here. */
     void prepare(double sampleRate) noexcept
     {
-        mDCBlocker.setSampleRate(sampleRate);
+        // Higher corner (60 Hz) than a plain DC blocker: stops boomy
+        // low-frequency resonance from accumulating in the feedback loop.
+        // The direct/dry signal keeps its full bass — only the feedback
+        // path is high-passed.
+        mDCBlocker.setSampleRate(sampleRate, 60.0f);
         mLimiter.prepare(sampleRate);
         // Pitch shifter is prepared separately via setPitchShifter()
         reset();

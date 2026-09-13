@@ -78,6 +78,7 @@ private:
     int    mActivePoints { 2 };
     int    mTargetPoints { 2 };  // desired point count (fades toward this)
     float  mPointFade[8] { 1,1,1,1,1,1,1,1 }; // per-point fade multiplier (0=silent, 1=full)
+    float  mPointFbComp[8] { 1,1,1,1,1,1,1,1 }; // resonance-aware feedback compensation
     double mSampleRate   { 44100.0 };
 
     // Waveform display ring buffer (written by DSP, read by UI)

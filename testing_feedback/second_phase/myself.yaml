@@ -1,0 +1,42 @@
+preset_reference_files_directory: "User/"
+
+# list of bugs and their presets that try capture what settings are used in that snapshot
+bugs:
+
+  - preset_file: "pitch_shift_uneven_1.octopreset"
+    description: | 
+      Here is an example of a resonant squeels that happen.
+      It seems that there are certain pitch shift frequencies that are 
+      ultra sensative and cause big jumps in the volume. this is one of those.
+
+  - preset_file: "pitch_shift_uneven_2.octopreset"
+    description: |
+      This one is more boomy, and I'm wondering if this is more caused by the 
+      resonance of the low freqency filter. I'm not sure what causes is, but 
+      when the cuttoff is lowered quite often there is a big resonant boom, which
+      can be good, but its a little unhinged and makes the plugin unpredictable and dangerous.
+
+  - preset_file: "texture_knob_breaks_cuttoff_sometimes.octopreset"
+    description: |
+      When opening the plugin, and without touching the 'texture' knob, I can move the points around
+      and the filter can be heard as changing. I can move the cutoff. However, as soon as I move the
+      main texture knob, this now renders the point cuttoff obsolete, and it does not control.
+      Moving the point does still control pan left and right.
+
+      It's important to note that this may be some issue with scale, as it's only when the texture knob
+      is at its full this is a problem, if I make the texture knob half way, the individual points moving
+      does work...
+  
+  - preset_file: "wet_dry_input_volume.octopreset"
+    description: |
+      The relationship between the input volume, output volume and wet/dry seems abit off.
+      When looking at it, if I make the wet all the way left or 'dry', then it plays the sound
+      uneffected by the plugin.. Great, but I would expect input volume to adjust that uneffected sound
+      So I think what needs to happen is the input volume sits in front of the signal chain for the full
+      'dry' signal? So we can control the volume inputted.
+  
+  - preset_file: "input_output_knob_fader_vanish.octopreset"
+    description: |
+      When moving the input and output knobs to the far left, it makes the graphic disappear which
+      appears like its broken, dry/wet doesn't do this, once moved far left it seems okay,
+      I would expect the knob to stay there just all the way left or right.
