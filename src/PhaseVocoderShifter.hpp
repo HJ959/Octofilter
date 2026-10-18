@@ -62,8 +62,10 @@ public:
     {
         for (int i = 0; i < numSamples; ++i)
         {
-            // Write input into circular buffer
-            mBuf[mWritePos & kBufMask] = in[i];
+            // Write input into circular buffer.
+            // mWritePos is always in [0, kBufMask] — masked on increment so it
+            // never overflows as a signed int (UB after ~13.5 h at 44.1 kHz).
+            mBuf[mWritePos] = in[i];
 
             // Read heads are offsets BEHIND the write head (positive = further back).
             // Offset advance speed:
@@ -96,7 +98,7 @@ public:
             const float envSum = env1 + env2 + 1e-10f;
             out[i] = (s1 * env1 + s2 * env2) / envSum;
 
-            ++mWritePos;
+            mWritePos = (mWritePos + 1) & kBufMask;
         }
     }
 

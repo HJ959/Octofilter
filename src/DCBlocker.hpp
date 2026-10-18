@@ -21,7 +21,16 @@ class DCBlocker
 public:
     static constexpr float kDefaultCornerHz = 20.0f;
 
-    DCBlocker() noexcept = default;
+    /**
+     * Constructor: initialises with 44100 Hz sample rate so the default
+     * mR value matches the hardcoded magic-number initialiser. Any use before
+     * setSampleRate() will silently apply the correct 44.1 kHz coefficient
+     * rather than an arbitrary default.
+     */
+    DCBlocker() noexcept
+    {
+        setSampleRate(44100.0, kDefaultCornerHz);
+    }
 
     void setSampleRate(double sampleRate, float cornerHz = kDefaultCornerHz) noexcept
     {
@@ -46,7 +55,7 @@ public:
     }
 
 private:
-    float mR     { 0.99715f }; // default for 20 Hz @ 44.1 kHz
+    float mR     { 0.99715f }; // overwritten by constructor; matches 20 Hz @ 44.1 kHz
     float mXprev { 0.0f };
     float mYprev { 0.0f };
 };

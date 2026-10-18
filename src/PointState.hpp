@@ -80,7 +80,12 @@ struct PointState
     void reset() noexcept
     {
         filter.reset();
-        feedback.reset(); // also resets shifter via FeedbackEngine
+        // Explicit shifter reset — avoids an ordering dependency on prepare().
+        // FeedbackEngine::reset() only resets the shifter via its mShifter pointer,
+        // which is not set until prepare() is called. This direct call ensures the
+        // shifter is always reset regardless of call order.
+        shifter.reset();
+        feedback.reset();
     }
 };
 

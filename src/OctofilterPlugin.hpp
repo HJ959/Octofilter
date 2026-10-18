@@ -58,7 +58,7 @@ protected:
 private:
     // ── Helpers ───────────────────────────────────────────────────────────
     void rebuildRouting() noexcept;
-    void updateFilterParams() noexcept;
+    void updateFilterParams(float textureOverride = -1.0f) noexcept;
     void prepareAllPoints() noexcept;
     void doRandomise() noexcept;
     void applyPendingState() noexcept;
@@ -120,6 +120,7 @@ private:
     // ── Randomise / state ─────────────────────────────────────────────────
     float     mLastRandomise { 0.0f };
     uint64_t  mRngSeed { 12345 };
+    bool      mRandomisePending { false }; // defers doRandomise() to run() (RT safety)
 
     // ── Harmonic mode ─────────────────────────────────────────────────────
     float mHarmonicMode  { 0.0f };  // 0=Random, 1=Harmonic
@@ -148,7 +149,12 @@ private:
         bool  hasGlobals       { false }; // true if globals are present in the state
         bool  valid            { false };
     };
-    PendingState              mPendingState;
+    // Double-buffer: host thread writes to the inactive slot, then publishes
+    // the slot index. Audio thread reads the published slot index atomically.
+    // This prevents a second setState() call from tearing the struct while the
+    // audio thread is still reading it (the race described in code-review #1).
+    PendingState              mPendingSlots[2];
+    std::atomic<int>          mWriteSlot { 0 };
     std::atomic<bool>         mHasPendingState { false };
 
     DISTRHO_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OctofilterPlugin)

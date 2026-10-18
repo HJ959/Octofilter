@@ -1,4 +1,5 @@
 #include "OctofilterPlugin.hpp"
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
@@ -237,7 +238,7 @@ void OctofilterPlugin::initParameter(uint32_t index, Parameter& p)
             std::snprintf(name, sizeof(name), "P%d Filter Type", point + 1);
             std::snprintf(sym,  sizeof(sym),  "p%d_filter_type", point + 1);
             p.name = name; p.symbol = sym;
-            p.ranges.min = 0.0f; p.ranges.max = 2.0f; p.ranges.def = 0.0f;
+            p.ranges.min = 0.0f; p.ranges.max = 3.0f; p.ranges.def = 0.0f;
             p.hints = kParameterIsAutomatable | kParameterIsInteger;
             break;
         case kPPCutoffOffset:
@@ -385,7 +386,7 @@ void OctofilterPlugin::setParameterValue(uint32_t index, float value)
         return;
     case kGlobalRandomise:
         if (value > 0.5f && mLastRandomise <= 0.5f)
-            doRandomise();
+            mRandomisePending = true; // deferred to run() to avoid RT violation
         mLastRandomise = value;
         return;
     case kGlobalHarmonicMode:
@@ -499,8 +500,17 @@ void OctofilterPlugin::setState(const char* key, const char* value)
             ps.level[kbuf[2] - '0'] = static_cast<float>(std::atof(vbuf));
     }
 
-    ps.valid       = true;
-    mPendingState  = ps;
+    ps.valid = true;
+
+    // Write to the slot that the audio thread is NOT currently reading.
+    // mWriteSlot holds the last published slot index, so the inactive slot
+    // is always (1 - mWriteSlot). We write there first, then atomically
+    // flip mWriteSlot before signalling mHasPendingState. The audio thread
+    // acquires mHasPendingState before reading mWriteSlot, so it always
+    // sees a fully-written struct — even under rapid back-to-back setState calls.
+    const int slot = 1 - mWriteSlot.load(std::memory_order_relaxed);
+    mPendingSlots[slot] = ps;
+    mWriteSlot.store(slot, std::memory_order_release);
     mHasPendingState.store(true, std::memory_order_release);
 }
 
@@ -508,7 +518,7 @@ String OctofilterPlugin::getState(const char* key) const
 {
     if (std::strcmp(key, "octofilter_state") != 0) return String();
 
-    char buf[2048] = {};
+    char buf[4096] = {};
     int  pos = 0;
 
     // Globals
@@ -531,8 +541,13 @@ String OctofilterPlugin::getState(const char* key) const
             i, mPointPan[i],
             i, mPointLevel[i]);
     }
-    std::snprintf(buf + pos, sizeof(buf) - pos, "seed=%llu\n",
+    pos += std::snprintf(buf + pos, sizeof(buf) - pos, "seed=%llu\n",
                   static_cast<unsigned long long>(mRngSeed));
+
+    // Safety: assert that we haven't silently truncated the state string.
+    // If this fires, increase the buffer size.
+    assert(pos < static_cast<int>(sizeof(buf)) - 1 && "getState buffer overflow — increase buf size");
+
     return String(buf);
 }
 #endif // DISTRHO_PLUGIN_WANT_STATE
@@ -553,8 +568,7 @@ void OctofilterPlugin::doRandomise() noexcept
         // resulting frequency rather than replacing the per-point cutoff.
         mPointCutoffOffset[i] = offsetDist(rng);
         mPoints[i].cutoffOffsetSemitones = mPointCutoffOffset[i];
-        requestParameterValueChange(
-            kNumGlobalParams + i * kNumPerPointParams + 1, mPointCutoffOffset[i]);
+        requestParameterValueChange(ppIdx(i, kPPCutoffOffset), mPointCutoffOffset[i]);
 
         mPointFilterType[i]   = static_cast<float>(typeDist(rng));
         mPointPitchShift[i]   = pitchDist(rng);
@@ -567,12 +581,9 @@ void OctofilterPlugin::doRandomise() noexcept
         mPoints[i].feedbackAmount = std::pow(mPointFeedback[i] / 1.1f, 0.6f) * 1.1f;
 
         // Notify UI of changed values
-        requestParameterValueChange(
-            kNumGlobalParams + i * kNumPerPointParams + 0, mPointFilterType[i]);
-        requestParameterValueChange(
-            kNumGlobalParams + i * kNumPerPointParams + 5, mPointFeedback[i]);
-        requestParameterValueChange(
-            kNumGlobalParams + i * kNumPerPointParams + 6, mPointPitchShift[i]);
+        requestParameterValueChange(ppIdx(i, kPPFilterType),   mPointFilterType[i]);
+        requestParameterValueChange(ppIdx(i, kPPFeedback),     mPointFeedback[i]);
+        requestParameterValueChange(ppIdx(i, kPPPitchShift),   mPointPitchShift[i]);
     }
     updateFilterParams();
 }
@@ -582,7 +593,11 @@ void OctofilterPlugin::applyPendingState() noexcept
 {
     if (!mHasPendingState.load(std::memory_order_acquire)) return;
 
-    const PendingState& ps = mPendingState;
+    // Acquire mWriteSlot AFTER acquiring mHasPendingState so we observe
+    // the slot index published by setState(). This pairs with the two
+    // release-stores in setState() and guarantees we read the complete struct.
+    const int slot = mWriteSlot.load(std::memory_order_acquire);
+    const PendingState& ps = mPendingSlots[slot];
     mRngSeed = ps.rngSeed;
 
     // Restore globals (if present in the state data — backwards compat)
@@ -627,13 +642,13 @@ void OctofilterPlugin::applyPendingState() noexcept
         mPoints[i].level = ps.level[i] > 0.0f ? ps.level[i] : 1.0f;
 
         // Notify UI
-        requestParameterValueChange(kNumGlobalParams + i * kNumPerPointParams + 0, mPointFilterType[i]);
-        requestParameterValueChange(kNumGlobalParams + i * kNumPerPointParams + 1, mPointCutoffOffset[i]);
-        requestParameterValueChange(kNumGlobalParams + i * kNumPerPointParams + 2, mPointQ[i]);
-        requestParameterValueChange(kNumGlobalParams + i * kNumPerPointParams + 3, mPointPan[i]);
-        requestParameterValueChange(kNumGlobalParams + i * kNumPerPointParams + 4, mPointLevel[i]);
-        requestParameterValueChange(kNumGlobalParams + i * kNumPerPointParams + 5, mPointFeedback[i]);
-        requestParameterValueChange(kNumGlobalParams + i * kNumPerPointParams + 6, mPointPitchShift[i]);
+        requestParameterValueChange(ppIdx(i, kPPFilterType),   mPointFilterType[i]);
+        requestParameterValueChange(ppIdx(i, kPPCutoffOffset), mPointCutoffOffset[i]);
+        requestParameterValueChange(ppIdx(i, kPPQ),            mPointQ[i]);
+        requestParameterValueChange(ppIdx(i, kPPPan),          mPointPan[i]);
+        requestParameterValueChange(ppIdx(i, kPPLevel),        mPointLevel[i]);
+        requestParameterValueChange(ppIdx(i, kPPFeedback),     mPointFeedback[i]);
+        requestParameterValueChange(ppIdx(i, kPPPitchShift),   mPointPitchShift[i]);
     }
 
     rebuildRouting();
@@ -646,6 +661,15 @@ void OctofilterPlugin::run(const float** inputs, float** outputs, uint32_t frame
 {
     // Apply any pending state from host thread (preset load)
     applyPendingState();
+
+    // Execute deferred randomise here on the audio thread, not in setParameterValue,
+    // to avoid the RT violation caused by std::mt19937_64 / distribution construction
+    // potentially heap-allocating on the audio thread.
+    if (mRandomisePending)
+    {
+        doRandomise();
+        mRandomisePending = false;
+    }
 
     const int numInputs = (DISTRHO_PLUGIN_NUM_INPUTS >= 2) ? 2 : 1;
     float* outL = outputs[0];
@@ -698,13 +722,10 @@ void OctofilterPlugin::run(const float** inputs, float** outputs, uint32_t frame
     mSmInputGain.setTarget(mInputGainLin);
     mSmOutputGain.setTarget(mOutputGainLin);
 
-    // Recalculate filter cutoffs from smoothed Texture each block (prevents zipper noise)
-    {
-        const float savedTexture = mTexture;
-        mTexture = mSmTexture.get();
-        updateFilterParams();
-        mTexture = savedTexture;
-    }
+    // Recalculate filter cutoffs from smoothed Texture each block (prevents zipper noise).
+    // Pass the smoothed value directly via textureOverride rather than temporarily
+    // mutating mTexture — the old save/restore pattern was fragile.
+    updateFilterParams(mSmTexture.get());
 
     const float smoothFeedback = mSmFeedback.get() * kFeedbackHeadroom;
     const float smoothInGain   = mSmInputGain.get();
@@ -780,10 +801,13 @@ void OctofilterPlugin::run(const float** inputs, float** outputs, uint32_t frame
         const float dryL = inputs[0][f] * smoothInGain;
         const float dryR = (numInputs > 1) ? inputs[1][f] * smoothInGain : dryL;
 
-        // Advance wet/dry smoother per-sample for click-free crossfade
+        // Advance wet/dry smoother per-sample for click-free crossfade.
+        // Cache get() once to avoid calling it twice per sample in the hot loop.
         mSmWetDry.setTarget(mWetDry);
-        outL[f] = (dryL * (1.0f - mSmWetDry.get()) + wetL * mSmWetDry.get()) * smoothOutGain;
-        outR[f] = (dryR * (1.0f - mSmWetDry.get()) + wetR * mSmWetDry.get()) * smoothOutGain;
+        const float wet = mSmWetDry.get();
+        const float dry = 1.0f - wet;
+        outL[f] = (dryL * dry + wetL * wet) * smoothOutGain;
+        outR[f] = (dryR * dry + wetR * wet) * smoothOutGain;
 
         // Output safety: DC block then limit to prevent ear damage
         outL[f] = mOutputLimiterL.process(mOutputDCL.process(outL[f]));
@@ -808,7 +832,7 @@ void OctofilterPlugin::rebuildRouting() noexcept
     }
 }
 
-void OctofilterPlugin::updateFilterParams() noexcept
+void OctofilterPlugin::updateFilterParams(float textureOverride) noexcept
 {
     const bool harmonic = (mHarmonicMode > 0.5f);
 
@@ -821,7 +845,11 @@ void OctofilterPlugin::updateFilterParams() noexcept
     //     their stored position.
     //   • Harmonic mode does NOT replace the per-point cutoff — it quantises
     //     each point's resulting frequency to the natural harmonic series.
-    const float texture = mTexture;
+    //
+    // textureOverride: when >= 0, use this value as the texture ceiling instead
+    // of mTexture (e.g. a smoothed value from run()). This avoids the fragile
+    // save/restore pattern where mTexture was temporarily mutated.
+    const float texture = (textureOverride >= 0.0f) ? textureOverride : mTexture;
     static constexpr float kHarmonicFundamental = 55.0f; // A1 reference
 
     for (int i = 0; i < mActivePoints; ++i)

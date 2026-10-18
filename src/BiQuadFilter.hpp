@@ -47,7 +47,8 @@ public:
 
     /**
      * Set cutoff frequency in Hz.
-     * Clamped to [20, sampleRate/2 - 1] internally.
+     * Clamped to a fixed [20, 20000] Hz range, independent of sample rate.
+     * At standard rates (≤ 96 kHz) 20 kHz is safely below Nyquist.
      */
     void setCutoff(float cutoffHz) noexcept
     {
